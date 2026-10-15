@@ -17,7 +17,15 @@ def _mapping(value):
 
 
 def record(
-    cfg, usage, *, model, response_id=None, context=None, status="completed", elapsed_ms=None
+    cfg,
+    usage,
+    *,
+    model,
+    response_id=None,
+    context=None,
+    status="completed",
+    elapsed_ms=None,
+    finish_reason=None,
 ):
     path = cfg.get("usage", {}).get("log_path")
     if not path:
@@ -29,6 +37,7 @@ def record(
     row = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "status": status,
+        "finish_reason": finish_reason,
         "usage_available": bool(values),
         "model": model,
         "response_id": response_id,

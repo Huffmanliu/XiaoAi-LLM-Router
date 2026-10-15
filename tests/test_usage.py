@@ -3,6 +3,8 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 import llm_router
 
 
@@ -13,12 +15,17 @@ def config(path):
     }
 
 
-def test_completed_response_saves_reported_usage_without_content(tmp_path):
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+def test_completed_response_saves_reported_usage_without_content(tmp_path, finish_reason, caplog):
     path = tmp_path / "usage.jsonl"
     response = SimpleNamespace(
         model="actual-model",
         id="response-1",
-        choices=[SimpleNamespace(message=SimpleNamespace(content="private reply"))],
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content="private reply"), finish_reason=finish_reason
+            )
+        ],
         usage={
             "prompt_tokens": 100,
             "completion_tokens": 23,
@@ -30,7 +37,7 @@ def test_completed_response_saves_reported_usage_without_content(tmp_path):
     )
 
     async def run():
-        with patch.object(llm_router, "acompletion", AsyncMock(return_value=response)):
+        with patch.object(llm_router, "acompletion", AsyncMock(return_value=response)) as call:
             assert (
                 await llm_router.ask(
                     config(path),
@@ -41,12 +48,17 @@ def test_completed_response_saves_reported_usage_without_content(tmp_path):
                 )
                 == "private reply"
             )
+            assert (
+                call.await_count == 1
+            )  # A token limit must not cause automatic paid continuations.
 
     asyncio.run(run())
     row = json.loads(path.read_text())
     assert (row["prompt_tokens"], row["completion_tokens"], row["total_tokens"]) == (100, 23, 123)
     assert row["prompt_cache_hit_tokens"] == 64 and row["reasoning_tokens"] == 5
     assert row["model"] == "actual-model" and row["device_id"] == "speaker"
+    assert row["finish_reason"] == finish_reason
+    assert ("token limit" in caplog.text) == (finish_reason == "length")
     assert "private" not in path.read_text()
 
 
@@ -74,6 +86,9 @@ def test_stream_records_usage_only_chunk(tmp_path):
             choices=[SimpleNamespace(delta=SimpleNamespace(content="测试回答。"))]
         )
         yield SimpleNamespace(
+            choices=[SimpleNamespace(delta=SimpleNamespace(content=None), finish_reason="stop")]
+        )
+        yield SimpleNamespace(
             choices=[], usage={"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13}
         )
 
@@ -87,3 +102,4 @@ def test_stream_records_usage_only_chunk(tmp_path):
     asyncio.run(run())
     row = json.loads(path.read_text())
     assert row["total_tokens"] == 13 and row["status"] == "completed"
+    assert row["finish_reason"] == "stop"
