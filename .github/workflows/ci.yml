@@ -1,36 +1,42 @@
 name: CI
-
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, 'improvements/**']
   pull_request:
-
+permissions:
+  contents: read
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.11', '3.12']
+    env:
+      LITELLM_LOCAL_MODEL_COST_MAP: 'True'
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-
-      - name: Install deps
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+      - name: Install dependencies
         run: pip install -r requirements.txt pytest flake8
-
-      - name: Lint (flake8)
-        run: flake8 main.py miservice_glue.py llm_router.py memory.py mi_tts.py mi_conversation.py --max-line-length=110
-
-      - name: Unit tests
+      - name: Lint
+        run: flake8 main.py miservice_glue.py llm_router.py memory.py mi_tts.py mi_conversation.py usage_ledger.py
+      - name: Unit tests (no credentials or live devices)
         run: python -m pytest tests/ -q
-
       - name: Syntax check
-        run: python -m py_compile main.py miservice_glue.py llm_router.py memory.py mi_tts.py mi_conversation.py
-
-      - name: Validate docker-compose config
-        run: docker compose config -q
-        continue-on-error: true
-
-      - name: Docker build dry-run
-        run: docker build -t xiaoai-llm-router:dry .
-        continue-on-error: true
+        run: python -m compileall -q main.py miservice_glue.py llm_router.py memory.py mi_tts.py mi_conversation.py usage_ledger.py
+  container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose using example configuration
+        run: |
+          cp .env.example .env
+          cp config.example.yaml config.yaml
+          docker compose config -q
+      - name: Build and check imports
+        run: |
+          docker build -t xiaoai-llm-router:check .
+          docker run --rm -e LITELLM_LOCAL_MODEL_COST_MAP=True xiaoai-llm-router:check python -c 'import main, mi_conversation, usage_ledger'
