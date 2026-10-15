@@ -3,8 +3,8 @@
 # v1.2：收音默认走 MiService Python 库（机型无关 conversation 拦截），所以
 #       miservice 是核心依赖。v1.0 误以为它不在 PyPI，v1.2 已验证 pip3 install 可装。
 #       poll-only 部署（ingest: poll）不强制需要它，但装了无副作用。
-miservice>=3.0          # 小爱音箱 API（device_list / get_latest_ask / text_to_speech）
-litellm>=1.40.0,<2.0   # 100+ LLM 统一出口（DeepSeek/Ollama/OpenAI 一行切换）
+miservice==3.0.1       # Tested Xiaomi login and speaker API
+litellm==1.105.1       # Tested unified LLM interface
 aiohttp>=3.9.0         # 异步 HTTP：HTTP 轮询收音 + HTTP TTS 兜底
 paho-mqtt>=2.0         # （可选）MQTT 收音模式；poll/conversation 用不到
 pyyaml>=6.0            # 读 config.yaml

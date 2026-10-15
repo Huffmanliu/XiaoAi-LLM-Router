@@ -7,3 +7,8 @@ tests/
 .git/
 graphflow-out/
 *.log
+deploy/
+.env.*
+.mi.token*
+*.jsonl
+.pytest_cache/

@@ -29,6 +29,11 @@
 from __future__ import annotations
 
 import logging
+import os
+import json
+import time
+import asyncio
+from mi_tts import speech_chunks
 
 log = logging.getLogger("xiaoai-router.mina")
 
@@ -126,9 +131,11 @@ class MiSpeaker:
         self.account = account
         self.mina = mina
         self.cfg = cfg
+        self._hardware = {}
+        self._miot_devices = {}
 
     @classmethod
-    async def connect(cls, cfg: dict) -> "MiSpeaker":
+    async def connect(cls, cfg: dict, session=None) -> "MiSpeaker":
         """登录小米账号，建 MiNAService。失败抛 RuntimeError（main 兜底）。"""
         import miservice  # 延迟 import：poll-only 部署不必装 miservice
         import aiohttp
@@ -142,14 +149,31 @@ class MiSpeaker:
                 "跑 --list-devices 前需要能登录小米云。"
             )
 
-        async with aiohttp.ClientSession() as session:
-            account = miservice.MiAccount(session, user, pwd)
+        owned_session = session is None
+        if owned_session:
+            session = aiohttp.ClientSession()
+        try:
+            token_path = os.path.expanduser(mi.get("token_path", "~/.mi.token"))
+            account = miservice.MiAccount(session, user, pwd, token_store=token_path)
             # 登录小爱云（sid=micoapi），serviceToken 落 ~/.mi.token 可复用
-            ok = await account.login("micoapi")
+            account.token = await account.token_store.load_token()
+            ok = bool(account.token and account.token.get("micoapi"))
+            if not ok:
+                ok = await account.login("micoapi")
             if not ok:
                 raise RuntimeError("小米账号登录失败（检查账号密码 / 是否需 OTP）")
             mina = miservice.MiNAService(account)
-            return cls(account, mina, cfg)
+            speaker = cls(account, mina, cfg)
+            speaker._owned_session = session if owned_session else None
+            return speaker
+        except BaseException:
+            if owned_session:
+                await session.close()
+            raise
+
+    async def close(self):
+        if getattr(self, "_owned_session", None) is not None:
+            await self._owned_session.close()
 
     # ---- 收音：拦截小爱最近一轮问答 ----
     async def latest_ask(self, device_id: str | None = None) -> dict | None:
@@ -160,9 +184,11 @@ class MiSpeaker:
           {"text": 用户说的, "device_id":..., "request_id":..., "ts":...}
         没有新问答 → None。
         """
-        did = device_id or await self._first_device()
+        did = device_id or self.cfg.get("mi", {}).get("device_id") or await self._first_device()
         if not did:
             return None
+        if self.cfg.get("mi", {}).get("conversation_source") == "cloud":
+            return await self._cloud_latest_ask(did)
         msgs = await self.mina.get_latest_ask(did)
         if not msgs:
             return None
@@ -181,21 +207,80 @@ class MiSpeaker:
             "ts": m.get("timestamp_ms", 0) / 1000.0,
         }
 
+    async def _cloud_latest_ask(self, device_id):
+        """Read the app's conversation history on devices with empty NLP buffers."""
+        import aiohttp
+
+        if device_id not in self._hardware:
+            rows = await self.mina.device_list() or []
+            self._hardware = {
+                d["deviceID"]: d["hardware"]
+                for d in rows
+                if d.get("deviceID") and d.get("hardware")
+            }
+        hardware = self._hardware.get(device_id)
+        if not hardware:
+            raise RuntimeError("Configured speaker not found in Xiaomi account")
+        for attempt in range(2):
+            token = self.account.token
+            cookies = {
+                "deviceId": device_id,
+                "serviceToken": token["micoapi"][1],
+                "userId": str(token["userId"]),
+            }
+            async with self.account._session.get(
+                "https://userprofile.mina.mi.com/device_profile/v2/conversation",
+                params={
+                    "source": "dialogu",
+                    "hardware": hardware,
+                    "timestamp": str(int(time.time() * 1000)),
+                    "limit": 2,
+                },
+                cookies=cookies,
+                timeout=aiohttp.ClientTimeout(total=15),
+            ) as response:
+                try:
+                    data = await response.json(content_type=None)
+                except (ValueError, TypeError):
+                    data = {}
+                valid = response.status == 200 and data.get("code") == 0
+            if valid:
+                break
+            if attempt == 0 and await self.account.login("micoapi"):
+                continue
+            raise RuntimeError("Xiaomi conversation API authentication failed")
+        body = data.get("data") or {}
+        body = json.loads(body) if isinstance(body, str) else body
+        records = body.get("records") or []
+        if not records:
+            return None
+        record = max(records, key=lambda r: r.get("time", 0))
+        text = (record.get("query") or "").strip()
+        if not text:
+            return None
+        return {
+            "text": text,
+            "device_id": device_id,
+            "request_id": record.get("requestId") or f"{device_id}:{record['time']}",
+            "ts": record["time"] / 1000.0,
+        }
+
     async def _first_device(self) -> str | None:
         """device_list 里找第一台小爱音箱（name 含 '小爱' 或 model 属 speaker）。"""
         devices = await self.mina.device_list() or []
         for d in devices:
             name = d.get("name") or d.get("nickname") or ""
             model = d.get("model") or d.get("hardware") or ""
-            did = str(d.get("did") or d.get("device_id") or "")
-            if did and (
-                "小爱" in name
-                or "speaker" in model.lower()
-                or "xiaoai" in model.lower()
-            ):
+            did = str(d.get("deviceID") or d.get("device_id") or d.get("did") or "")
+            if did and ("小爱" in name or "speaker" in model.lower() or "xiaoai" in model.lower()):
                 return did
         if devices:
-            return str(devices[0].get("did") or devices[0].get("device_id") or "")
+            return str(
+                devices[0].get("deviceID")
+                or devices[0].get("device_id")
+                or devices[0].get("did")
+                or ""
+            )
         return None
 
     # ---- 自检：列出账号下所有小爱音箱 + 档位（--list-devices）----
@@ -203,25 +288,60 @@ class MiSpeaker:
         devices = await self.mina.device_list() or []
         out = []
         for d in devices:
-            hw = (d.get("model") or d.get("hardware") or "").upper()
+            hw = (d.get("hardware") or d.get("model") or "").upper()
             name = d.get("name") or d.get("nickname") or "?"
-            did = str(d.get("did") or d.get("device_id") or "")
+            did = str(d.get("deviceID") or d.get("device_id") or d.get("did") or "")
             tier = tier_of(hw)
             out.append({"name": name, "did": did, **tier})
         return out
 
     # ---- 播报：让音箱念出 LLM 回复（v1.2 嘴）----
-    async def tts(self, device_id: str, text: str) -> None:
+    async def tts(self, device_id: str, text: str) -> bool:
+        text = (text or "").strip()
+        max_chars = max(10, int(self.cfg.get("tts", {}).get("max_chunk_chars", 60)))
+        chunks = [text] if text and len(text) <= max_chars else speech_chunks(text, max_chars)
+        if len(chunks) > 1:
+            log.info("tts split device=%s chars=%d chunks=%d", device_id, len(text), len(chunks))
+        for index, chunk in enumerate(chunks):
+            if not await self._tts_once(device_id, chunk):
+                return False
+            if index + 1 < len(chunks):
+                # These speakers return paused music state even while speaking.
+                # Use conservative pacing rather than treating that as TTS completion.
+                cps = max(1.0, float(self.cfg.get("tts", {}).get("chars_per_second", 3.5)))
+                await asyncio.sleep(1.5 + len(chunk) / cps)
+        return bool(chunks)
+
+    async def _tts_once(self, device_id: str, text: str) -> bool:
         """text_to_speech 播报。失败只打日志（不抛），念不出不中断对话流。"""
         text = (text or "").strip()
         if not text:
             return
         try:
+            if device_id in self.cfg.get("tts", {}).get("stop_music_before_speech", []):
+                if not await self.mina.player_stop(device_id):
+                    raise RuntimeError("Could not stop music before speech")
+            if self.cfg.get("tts", {}).get("method") == "miot":
+                import miservice
+
+                if device_id not in self._miot_devices:
+                    rows = await self.mina.device_list() or []
+                    self._miot_devices = {d["deviceID"]: d for d in rows if d.get("deviceID")}
+                device = self._miot_devices[device_id]
+                command = tier_of(device["hardware"])["tts"]
+                iid = tuple(int(part) for part in command.split("-"))
+                code = await miservice.MiIOService(self.account).miot_action(
+                    str(device["miotDID"]), iid, [text]
+                )
+                if code != 0:
+                    raise RuntimeError(f"MIoT speech action failed, code={code}")
+                log.info("miot tts accepted → %s: %s", device_id, text[:40])
+                return True
             ok = await self.mina.text_to_speech(device_id, text)
-            log.info(
-                "tts → %s: %s", device_id, text[:30] + ("…" if len(text) > 30 else "")
-            )
+            log.info("tts → %s: %s", device_id, text[:30] + ("…" if len(text) > 30 else ""))
             if not ok:
                 log.warning("tts returned False for device %s", device_id)
+            return bool(ok)
         except Exception as e:
             log.error("tts failed: %s", e)
+            return False

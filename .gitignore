@@ -6,6 +6,14 @@ __pycache__/
 # 本地配置（含密钥，禁止入库）
 config.yaml
 .env
+.env.*
+!.env.example
+.mi.token*
+*.jsonl
+.pytest_cache/
+
+# Local deployment notes, live configuration and private test artifacts
+/deploy/
 
 # Docker 日志
 *.log
