@@ -1,134 +1,98 @@
-# XiaoAi-LLM-Router（小爱同学全能大模型网关）
+# XiaoAi-LLM-Router — Huffman 维护版
 
-**[中文](README.md) | [English](README_EN.md)**
+[English](README_EN.md) · [原项目](https://github.com/FelixQiu1/XiaoAi-LLM-Router)
 
+通过小米云读取小爱音箱的对话文字，将带触发词的问题交给大模型，再让提问的音箱播出回答。
+本仓库是 FelixQiu1/XiaoAi-LLM-Router 的 Fork，保留原作者历史与 MIT 许可证，集中维护设备接入、长回答播报和用量记录的改进。
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Python-3.11+-blue.svg" alt="Python">
-  <img src="https://img.shields.io/badge/Docker-Compose-green.svg" alt="Docker">
-  <img src="https://img.shields.io/badge/LiteLLM-Any%20Model-purple.svg" alt="LiteLLM">
-  <img src="https://img.shields.io/badge/Ingest-MQTT%20%2B%20Poll-orange.svg" alt="Ingest">
-  <img src="https://img.shields.io/badge/Privacy-Local%20First-red.svg" alt="Privacy">
-  <img src="https://img.shields.io/badge/License-MIT-yellow.svg" alt="License">
-  <img src="https://github.com/FelixQiu1/XiaoAi-LLM-Router/actions/workflows/ci.yml/badge.svg" alt="CI">
-</p>
+## 当前能力
 
-> **一键把家里那台"只会说天气"的老旧小爱同学，升级成 DeepSeek / Ollama 智能管家。**
-> 不用拆机、不用刷固件、不用改硬件——它只是在你现有的 MiService 网关旁边，
-> 多了一条"AI 回路"：小爱收音 → LLM 思考 → TTS 说回。
+- 使用 MiService Python 库登录、列出设备；小米云对话历史作为接收来源。
+- 支持多台设备轮询，分别维护上下文和去重状态。
+- 通过 LiteLLM 调用 DeepSeek、Ollama 等模型。
+- MIoT 播报按硬件型号选择指令；长回答按字数分段、按保守语速等待后依次提交。
+- 可按设备配置播报前停止音乐，避免旧音乐影响语音回复。
+- 可记录供应商实际返回的输入、输出、缓存及推理 token 用量；不在用量文件中保存对话正文或密钥。
+- 以短句语音问答、MIoT 播报验证过 LX04 和 L05B；这不代表所有设备或所有问题都可用。
 
-## ✨ 这是什么？
+## 已知限制
 
-一句话：**生态整合，不从零造轮子**。
+- **这不是小米官方授权的集成，也不是面向收费用户的成熟服务。** 开源许可证不代表获得小米接口使用或商业运营授权。请另行核实相关服务协议。
+- 接收依赖小米云历史记录。音箱屏幕显示完整问题，不保证该问题出现在云端接口；实测部分长问题未进入记录，短句可以正常处理，具体限制尚未确定。
+- 即使用 Ollama 本地运行模型，音箱接入和控制仍依赖小米云，不能称为完全离线。
+- 各设备上下文独立；默认保留最近 10 轮，闲置 10 分钟清空；程序重启也会清空。
+- 每次提问或追问都需要触发词，例如“深思”或“问问AI”。
+- 分段等待是按语速估算，不是可靠的播放完成回调；会有段间停顿。目前推荐 `stream: false`。尚无完善的语音打断或跨设备并行播放调度。
+- **用量记录不是预算控制。** 当前没有用户限额、费用熔断或单次输出 token 的强制限额；失败请求没有供应商用量时记为未知，不推断为零。
+- 云端实际用量可能包含重试等记录无法完整解释的情况，最终费用以模型服务商账单为准。
 
-```
-小爱同学(收音) ─MiService MQTT/poll─▶ XiaoAi-LLM-Router ─LiteLLM─▶ DeepSeek / Ollama / OpenAI
-小爱同学(播放) ◀─小米 TTS(短句逐句播)────────────────────────────────┘
-```
+## 本地安装
 
-| 组件 | 我们复用了什么 | 我们只写了什么 |
-|------|---------------|----------------|
-| 收音 | MiService MQTT Bridge（延迟 <1s），HTTP 轮询兜底 | 唤醒词过滤（"问问 AI" / "深思"） |
-| 思考 | LiteLLM（100+ 供应商统一接口） | 多轮对话记忆 + 流式"边想边说" |
-| 嘴 | 小米 Mi TTS 接口 | 把 LLM 回复切成短句逐句播回 |
-
-**核心特性：**
-
-- 🔄 **多模型无缝切换**：一个 YAML 配置切换 DeepSeek / Ollama 本地模型 / OpenAI / Claude，
-  同一套唤醒词、同一套记忆，零代码改动。
-- 🧠 **多轮对话记忆**：按设备 + 时间窗自动维护上下文（TTL 默认 10 分钟），
-  "它刚才说的那个东西再大一点"这种指代问题也能接住。
-- ⚡ **边想边说（流式）**：模型每攒够一个短句立即 TTS，小爱的"思考感"从 15s 降到 2s。
-- 🔒 **本地部署，隐私保护**：Ollama 模式下整条链路不离开局域网，对话不出户。
-- 🐳 **一条命令部署**：docker compose up -d --build。
-- 🧪 **演示模式**：python main.py --demo 不依赖 MiService，终端输入也能跑通全链路。
-
-## 🚀 30 秒部署
+需要 Python 3.11 或 3.12，以及可登录的自有小米账号和在线音箱。
 
 ```bash
-# 1. 克隆仓库
-git clone https://github.com/FelixQiu1/XiaoAi-LLM-Router.git && cd XiaoAi-LLM-Router
-
-# 2. 复制并编辑配置（小米账号、设备号、API Key；密钥建议走 .env）
+git clone https://github.com/Huffmanliu/XiaoAi-LLM-Router.git
+cd XiaoAi-LLM-Router
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 cp config.example.yaml config.yaml
-cp .env.example .env && nano .env
+cp .env.example .env
+```
 
-# 3. 构建并启动（前提：MiService 已在本机或同网段跑着）
-docker compose up -d --build
+在 `.env` 中填写 `MI_USERNAME`、`MI_PASSWORD` 和所选模型的 API Key。环境变量优先于配置文件。
 
-# 4. 看日志确认握手（应看到 mqtt ingest: connecting ...）
+```bash
+.venv/bin/python main.py --list-devices
+```
+
+首次登录可能要求短信验证码，请在交互终端中完成验证。将设备列表中的 **MiNA deviceID** 填入配置文件的 `mi.device_id` 或 `mi.devices`；它与数字形式的 MIoT DID 不同。
+
+```bash
+.venv/bin/python main.py --config config.yaml
+```
+
+示例：“小爱同学，深思，洗车该开车还是走路？”
+
+## 容器部署
+
+配置好 `.env` 和 `config.yaml` 后，把配置中的令牌路径改为持久卷目录：
+
+```yaml
+mi:
+  token_path: /home/router/.local/state/xiaoai-router/mi.token
+# 如需用量统计，启用下面的配置：
+usage:
+  log_path: /home/router/.local/state/xiaoai-router/usage.jsonl
+```
+
+首次使用交互终端完成登录，再启动后台服务：
+
+```bash
+docker compose build
+docker compose run --rm router python main.py --list-devices
+docker compose up -d
 docker compose logs -f router
 ```
 
-对着小爱说：
+凭据、登录令牌和用量文件不得提交到 Git。容器配置不开放额外的公网入站端口。
 
-```
-小爱同学，问问 AI：为什么月亮晚上才上班？
-```
+## 开发与版本管理
 
-小爱会"接"到 DeepSeek/Ollama 的回答，并用自己的音色念给你听。✅
-
-**没有小米设备？** 跑 python main.py --demo，从终端打字 → 走完整条 LLM 链路，
-TTS 部分打印文字（装了 edge-tts 能直接出声）。
-
-## ⚙️ 配置速查（config.yaml）
-
-```yaml
-miservice:
-  ingest: "auto"                # auto=先连 MQTT，3s 连不上自动回落 HTTP 轮询
-  mqtt_host: "127.0.0.1"       # 容器部署时改成 MiService 所在主机
-  base_url: "http://localhost:8080"
-
-llm:
-  default_provider: deepseek   # deepseek | ollama | openai（LiteLLM 支持的均可）
-  stream: true                 # 边想边说（推荐开）
-
-trigger:
-  wake_words: ["问问 AI", "深思"]
-  # ⚠️ 不要加 "请问"：它出现在小爱 99% 的指令里，网关会变成抢答的复读机
-
-session:
-  ttl_seconds: 600             # 多轮记忆窗口（同一设备 10 分钟不聊就清零）
+```bash
+.venv/bin/pip install pytest flake8
+.venv/bin/python -m pytest tests/ -q
+.venv/bin/flake8 main.py miservice_glue.py llm_router.py memory.py mi_tts.py mi_conversation.py usage_ledger.py
 ```
 
-完整模板在 config.example.yaml，每段都有中文注释。
+测试不需要真实账号、音箱或 API Key。GitHub Actions 检查 Python 3.11/3.12 的测试与代码规范，并验证容器构建及运行模块导入。
 
-## 🧩 二次开发指引
+- `origin`：你的 Fork；`upstream`：原作者仓库。
+- 功能和修复在独立分支完成，经测试及 PR 检查后合并到自己的 `main`。
+- 部署时记录明确的标签或提交编号；升级前备份运行配置和状态，回滚时只更换代码。
+- 私人服务器地址、设备编号、凭据和实际对话记录保留在部署环境，不放在公共仓库。
 
-main.py 被刻意写成"胶水"——四个纯函数模块拼装，每个都能单独替换：
+详细改进见 [CHANGELOG.md](CHANGELOG.md)。
 
-```
-miservice_glue.py(收音:MQTT+poll) → main.py(唤醒判定/流水线) → llm_router.py(LiteLLM 统一出口)
-                                                        ↓
-                                    memory.py(多轮 session) → mi_tts.py(TTS 短句播回)
-```
+## 许可证与依赖
 
-- **换收音源**（WebSocket / 本地麦克风 ASR）：实现 consume()，
-  保持产出 {"text","device_id","session_id","ts"} 契约即可，main.py 只改一行分发。
-- **换模型**：零代码，llm.<provider> 配置驱动。
-- **加意图**（"深思"自动附 system prompt）：wake_words 用字典形态
-  {word: "深思", prefix: "..."}，resolve_system_prompt() 自动拼。
-- **加环节**（敏感词过滤 / 工具调用）：main.py handle() 里 ①~⑤ 之间加一行。
-
-## 📈 路线图
-
-- [ ] 语音打断（barge-in）：新句子到达时立即掐断 TTS 播放队列
-- [ ] 工具调用：让"深思"模式可以调日历 / 天气 API
-- [ ] 多房间：按 room:device 复合键隔离 memory 与音色（Redis 后端选项）
-- [ ] GitHub 一键 Action 部署
-
-## 🤝 致谢与依赖
-
-- [MiService](https://github.com/m1cnter/MiService) — 小爱同学 API 逆向（MQTT Bridge）
-- [LiteLLM](https://github.com/BerriAI/litellm) — 100+ LLM 统一接口
-
-MIT 协议，放心用。Star ⭐ 是最好的鼓励。
-
----
-
-`# Xiaomi #DeepSeek #Ollama #LiteLLM #SmartHome #LLM #IoT #Docker`
-## 相关文档
-
-- 小爱音箱支持列表（你的音箱能不能用？）：[docs/SUPPORTED_DEVICES.md](docs/SUPPORTED_DEVICES.md)
-- v1.2 更新说明：[docs/RELEASE_v1.2.md](docs/RELEASE_v1.2.md)
-- GitHub Release Notes（可直接贴）：[docs/GITHUB_RELEASE_v1.2.md](docs/GITHUB_RELEASE_v1.2.md)
+MIT，保留原作者 FelixQiu1 的版权声明。依赖 [MiService](https://github.com/Yonsm/MiService) 与 [LiteLLM](https://github.com/BerriAI/litellm)。
