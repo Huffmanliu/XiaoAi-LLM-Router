@@ -147,9 +147,12 @@ class RouterPipeline:
         self.wake_words = (cfg.get("trigger", {}) or {}).get("wake_words", ["问问 AI"])
         self.stream = bool((cfg.get("llm", {}) or {}).get("stream", False))
         self.default_prompt = (
-            "你是小爱同学的 AI 大脑。用户的话会被 TTS 念出来，"
-            "所以回答要口语化、每句不超过 50 字、不要 markdown 符号、"
-            "不要说『作为 AI』这类开场白。"
+            "你是小爱同学的 AI 大脑。你的回答会被 TTS 分段念出来。"
+            "回答要口语化，每句尽量不超过 50 字，不要 markdown 符号，"
+            "不要说『作为 AI』这类开场白。短句要求只限制单句，不限制回答总长度。"
+            "先确保完整满足用户要求，再精简表达。用户要求全部、逐一或指定数量时，"
+            "必须覆盖所有项目，不能只讲开头几项就结束。可用第一、第二等口语序号，"
+            "每项用一两句简短说明。发送前检查是否遗漏，不要用‘等等’代替剩余项目。"
         )
         self.sessions = mem.MemoryStore(
             ttl=(cfg.get("session", {}) or {}).get("ttl_seconds", 600),

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Clarify that short spoken sentences do not limit the overall answer; explicitly ask for every requested item in enumerations.
+- Save the provider's finish reason in usage records and warn when a token limit truncates output, including streams whose final chunk contains only usage.
+- Keep one model request per answer; no automatic paid continuations are introduced. Prompt changes improve completeness but cannot guarantee model compliance.
+
 ## huffman-v0.1.0 — 2026-10-15
 
 First maintained fork release, based on upstream commit `87c627c317fd00dd8dfae7a565ae83c6fcbfe0b6`.

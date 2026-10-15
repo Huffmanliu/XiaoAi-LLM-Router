@@ -91,9 +91,13 @@ async def ask(
 
     started = time.monotonic()
     response = None
+    finish_reason = None
     try:
         resp = await acompletion(model=model_str, messages=payload, **extra)
         response = resp
+        finish_reason = getattr(resp.choices[0], "finish_reason", None)
+        if finish_reason == "length":
+            log.warning("Model output reached its token limit; answer may be incomplete")
         text = (resp.choices[0].message.content or "").strip()
         return text or "（模型没有返回内容）"
     except AuthenticationError as e:
@@ -111,6 +115,7 @@ async def ask(
             context=request_context,
             status="completed" if response is not None else "failed_or_interrupted",
             elapsed_ms=round((time.monotonic() - started) * 1000),
+            finish_reason=finish_reason,
         )
 
 
@@ -143,6 +148,7 @@ async def ask_stream(
     response_id = None
     actual_model = model_str
     complete = False
+    finish_reason = None
     try:
         resp = await acompletion(
             model=model_str,
@@ -156,6 +162,8 @@ async def ask_stream(
             usage = getattr(chunk, "usage", None) or usage
             response_id = getattr(chunk, "id", None) or response_id
             actual_model = getattr(chunk, "model", None) or actual_model
+            if chunk.choices:
+                finish_reason = getattr(chunk.choices[0], "finish_reason", None) or finish_reason
             delta = chunk.choices[0].delta.content if chunk.choices else None
             if not delta:
                 continue
@@ -179,6 +187,8 @@ async def ask_stream(
         if buf.strip():
             yield buf.strip()
         complete = True
+        if finish_reason == "length":
+            log.warning("Model output reached its token limit; answer may be incomplete")
     except AuthenticationError as e:
         raise RuntimeError(f"{model_str} 鉴权失败：{e}") from e
     except APIError as e:
@@ -192,4 +202,5 @@ async def ask_stream(
             context=request_context,
             status="completed" if complete else "failed_or_interrupted",
             elapsed_ms=round((time.monotonic() - started) * 1000),
+            finish_reason=finish_reason,
         )
