@@ -20,9 +20,14 @@ v1.1 修正点：
 from __future__ import annotations
 
 import logging
+import os
+import time
+import usage_ledger
 
-from litellm import acompletion
-from litellm.exceptions import BadRequestError, AuthenticationError, APIError
+os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
+from litellm import acompletion  # noqa: E402 - set the offline cost-map flag before import
+from litellm.exceptions import BadRequestError, AuthenticationError, APIError  # noqa: E402
 
 # 流式：本版本 litellm 没有独立的 astream() 出口 —— 用 acompletion(stream=True)，
 # 返回的响应本身是 async 生成器（chunk.choices[0].delta.content）。
@@ -73,7 +78,7 @@ def _payload(system_prompt: str, messages: list[dict], user_text: str) -> list[d
 
 
 async def ask(
-    cfg: dict, system_prompt: str, messages: list[dict], user_text: str
+    cfg: dict, system_prompt: str, messages: list[dict], user_text: str, request_context=None
 ) -> str:
     """发一次 LLM 请求，返回纯文本回复。
 
@@ -84,8 +89,11 @@ async def ask(
     model_str, extra = _litellm_target(cfg)
     payload = _payload(system_prompt, messages, user_text)
 
+    started = time.monotonic()
+    response = None
     try:
         resp = await acompletion(model=model_str, messages=payload, **extra)
+        response = resp
         text = (resp.choices[0].message.content or "").strip()
         return text or "（模型没有返回内容）"
     except AuthenticationError as e:
@@ -94,6 +102,16 @@ async def ask(
         raise RuntimeError(f"{model_str} 请求被拒（可能超上下文窗口）：{e}") from e
     except APIError as e:
         raise RuntimeError(f"{model_str} 上游错误：{e}") from e
+    finally:
+        usage_ledger.record(
+            cfg,
+            getattr(response, "usage", None),
+            model=getattr(response, "model", model_str),
+            response_id=getattr(response, "id", None),
+            context=request_context,
+            status="completed" if response is not None else "failed_or_interrupted",
+            elapsed_ms=round((time.monotonic() - started) * 1000),
+        )
 
 
 def _split_sentence(text: str, min_chars: int = 12) -> str | None:
@@ -107,7 +125,7 @@ def _split_sentence(text: str, min_chars: int = 12) -> str | None:
 
 
 async def ask_stream(
-    cfg: dict, system_prompt: str, messages: list[dict], user_text: str
+    cfg: dict, system_prompt: str, messages: list[dict], user_text: str, request_context=None
 ):
     """流式版 ask()：攒够一个短句就 yield，最后一句没有标点也会收尾吐出。
 
@@ -120,12 +138,24 @@ async def ask_stream(
     model_str, extra = _litellm_target(cfg)
     payload = _payload(system_prompt, messages, user_text)
 
+    started = time.monotonic()
+    usage = None
+    response_id = None
+    actual_model = model_str
+    complete = False
     try:
         resp = await acompletion(
-            model=model_str, messages=payload, stream=True, **extra
+            model=model_str,
+            messages=payload,
+            stream=True,
+            stream_options={"include_usage": True},
+            **extra,
         )
         buf = ""
         async for chunk in resp:
+            usage = getattr(chunk, "usage", None) or usage
+            response_id = getattr(chunk, "id", None) or response_id
+            actual_model = getattr(chunk, "model", None) or actual_model
             delta = chunk.choices[0].delta.content if chunk.choices else None
             if not delta:
                 continue
@@ -144,9 +174,22 @@ async def ask_stream(
                 elif len(buf) >= 120:  # 模型一直不打标点（代码/长句）→ 强行切
                     out, buf = buf[:120], buf[120:]
                     yield out
+                else:
+                    break
         if buf.strip():
             yield buf.strip()
+        complete = True
     except AuthenticationError as e:
         raise RuntimeError(f"{model_str} 鉴权失败：{e}") from e
     except APIError as e:
         raise RuntimeError(f"{model_str} 流式上游错误：{e}") from e
+    finally:
+        usage_ledger.record(
+            cfg,
+            usage,
+            model=actual_model,
+            response_id=response_id,
+            context=request_context,
+            status="completed" if complete else "failed_or_interrupted",
+            elapsed_ms=round((time.monotonic() - started) * 1000),
+        )

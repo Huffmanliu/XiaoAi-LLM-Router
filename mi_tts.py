@@ -54,9 +54,26 @@ def split_sentences(text: str, max_chars: int = 60) -> list[str]:
         if len(p) <= max_chars:
             out.append(p)
             continue
-        sub = re.findall(r".{1,%d}(?=[，、；,])|.+?" % max_chars, p)
-        out.extend(s.strip() for s in sub if s and s.strip())
+        while len(p) > max_chars:
+            cut = max(p.rfind(mark, 0, max_chars) for mark in "，、；, ") + 1
+            cut = cut if cut > max_chars // 2 else max_chars
+            out.append(p[:cut].strip())
+            p = p[cut:].strip()
+        if p:
+            out.append(p)
     return out
+
+
+def speech_chunks(text: str, max_chars: int = 60) -> list[str]:
+    """Group sentence fragments into bounded commands, avoiding one-character chunks."""
+    max_chars = max(10, int(max_chars))
+    chunks = []
+    for sentence in split_sentences(text, max_chars):
+        if chunks and len(chunks[-1]) + len(sentence) + 1 <= max_chars:
+            chunks[-1] += " " + sentence
+        else:
+            chunks.append(sentence)
+    return chunks
 
 
 class Speaker:
@@ -85,9 +102,7 @@ class Speaker:
         payload = {"device": device_id, "text": text}
         try:
             timeout = aiohttp.ClientTimeout(total=20)
-            async with self.session.post(
-                self._url(), json=payload, timeout=timeout
-            ) as resp:
+            async with self.session.post(self._url(), json=payload, timeout=timeout) as resp:
                 if resp.status >= 400:
                     log.error("TTS failed: HTTP %s %s", resp.status, await resp.text())
                 else:
@@ -99,9 +114,7 @@ class Speaker:
         except aiohttp.ClientError as e:
             log.error("TTS unreachable: %s", e)
 
-    async def speak_chunks(
-        self, device_id: str, answer: str, max_chars: int = 60
-    ) -> None:
+    async def speak_chunks(self, device_id: str, answer: str, max_chars: int = 60) -> None:
         """把完整回复切成短句逐句播（main.py 非流式路径走这里）。"""
         for chunk in split_sentences(answer, max_chars):
             await self.speak(device_id, chunk)
