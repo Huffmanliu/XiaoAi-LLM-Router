@@ -309,7 +309,7 @@ class MiSpeaker:
                 # These speakers return paused music state even while speaking.
                 # Use conservative pacing rather than treating that as TTS completion.
                 cps = max(1.0, float(self.cfg.get("tts", {}).get("chars_per_second", 3.5)))
-                await asyncio.sleep(1.0 + len(chunk) / cps)
+                await asyncio.sleep(0.5 + len(chunk) / cps)
         return bool(chunks)
 
     async def _tts_once(self, device_id: str, text: str) -> bool:
