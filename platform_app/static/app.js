@@ -18,6 +18,7 @@ function displayWorkspace(loggedIn){
 }
 const state = {me:null, csrf:'', deviceSaving:false, adminTab:'users', modelServices:[], modelTesting:null, view:'overview', devices:[], selected:new Set(), login:null,
   bindingEditing:false, bindingMode:'bind', checkingLogin:false, admin:null, historyBefore:null, historyAfter:null, historyBusy:false, historyReload:false, historyEpoch:0, refreshing:false, invite:null, loginCompleted:null};
+const rankingState={page:1,pages:1,epoch:0,controller:null,lastAttempt:0,lastUpdated:null,autoDate:true};
 const labels = {overview:['概览','一切尽在掌握'], devices:['我的设备','选择连接，让 AI 就位'],
   history:['对话历史','留住每一次好奇'], dialogue:['对话设置','让回答更合你的心意'],
   admin:['管理后台','关注运行，尊重隐私'], account:['账号与安全','安心使用，从这里开始']};
@@ -28,8 +29,8 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt
 const number = (n) => n == null ? '未知' : Number(n).toLocaleString('zh-CN');
 const date = (n) => new Date(n*1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
 function toast(message){$('toast').textContent=message;$('toast').hidden=false;clearTimeout(toast.timer);toast.timer=setTimeout(()=>{$('toast').hidden=true;},5000);}
-async function api(path,method='GET',data){
-  const options={method,credentials:'same-origin',headers:{'X-CSRF-Token':state.csrf}};
+async function api(path,method='GET',data,signal){
+  const options={method,credentials:'same-origin',headers:{'X-CSRF-Token':state.csrf},signal};
   if(data!==undefined){options.headers['Content-Type']='application/json';options.body=JSON.stringify(data);}
   const r=await fetch('/api'+path,options);
   const result=await r.json();
@@ -40,13 +41,14 @@ async function api(path,method='GET',data){
 function resetBindingForm(){
   state.bindingEditing=false;state.bindingMode='bind';
   const f=$('binding-form');f.reset();
+  $('xiaomi-password-help').open=false;
   for(const name of ['xiaomi_account','xiaomi_secret']){const input=f.elements.namedItem(name);input.value='';input.readOnly=true;}
 }
 for(const name of ['xiaomi_account','xiaomi_secret']){
   const input=$('binding-form').elements.namedItem(name);
   input.addEventListener('focus',()=>{input.readOnly=false;});
 }
-function showAuth(){ resetBindingForm();$('model-service-form').reset();$('model-service-form').elements.id.value='';state.modelServices=[];state.modelTesting=null;state.historyEpoch++;$('history-list').replaceChildren();displayWorkspace(false); }
+function showAuth(){ resetRanking();resetBindingForm();$('model-service-form').reset();$('model-service-form').elements.id.value='';state.modelServices=[];state.modelTesting=null;state.historyEpoch++;$('history-list').replaceChildren();displayWorkspace(false); }
 async function busy(button,work){if(button?.disabled)return;if(button)button.disabled=true;try{return await work();}finally{if(button)button.disabled=false;}}
 function action(id,work){$(id).addEventListener('click',()=>busy($(id),work).catch(e=>toast(e.message)));}
 function form(id,work){$(id).addEventListener('submit',e=>{e.preventDefault();const data=new FormData(e.target);busy(e.submitter||e.target.querySelector('button[type=submit]'),()=>work(data,e.target)).catch(e=>toast(e.message));});}
@@ -152,7 +154,9 @@ function updateConnection(){
   $('xiaomi-account-input').disabled=mode==='reverify';
   $('xiaomi-account-input').required=mode!=='reverify';
   $('xiaomi-submit').textContent=mode==='reverify'?'重新绑定当前小米账号':mode==='replace'?'验证新绑定账号':'绑定并获取设备';
-  $('binding-hint').textContent=mode==='reverify'?'仅重新绑定上方的小米账号，不能在此更换账号。请输入该小米账号的密码，按小米要求完成验证码验证。':mode==='replace'?'填写新小米账号和密码。验证期间旧账号仍在使用，验证成功后还需确认才会切换。':'你已登录平台，还未绑定小米账号。请填写你自己的小米账号与密码，平台账号不能用于此处。';
+  const cancelLabel=mode==='replace'?'取消更换':mode==='reverify'?'取消本次操作':'暂不绑定';
+  $('cancel-login').textContent=cancelLabel;$('cancel-active-login').textContent=cancelLabel;
+  $('binding-hint').textContent=mode==='reverify'?'仅重新绑定上方的小米账号，不能在此更换账号。请输入该小米账号的密码，按小米要求完成验证码验证。':mode==='replace'?'填写新小米账号和密码。提交时按需验证平台安全邮箱，原绑定保持不变；新账号验证成功后，还需确认才会切换。':'你已登录平台，还未绑定小米账号。请填写你自己的小米账号与密码，平台账号不能用于此处。';
   $('cancel-active-login').hidden=!loginActive;
   $('login-state').hidden=!loginActive&&!['failed','expired','cancelled'].includes(state.login?.state);
   $('switch-confirmation').hidden=!pending;
@@ -239,7 +243,68 @@ async function loadAdmin(){
 function setAdminTab(key){
   state.adminTab=key;
   document.querySelectorAll('[data-admin-tab]').forEach(tab=>{const selected=tab.dataset.adminTab===key;tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;$(tab.getAttribute('aria-controls')).hidden=!selected;});
+  refreshRankingIfDue();
 }
+function beijingDay(){return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());}
+function resetRanking(){
+  rankingState.epoch++;rankingState.controller?.abort();rankingState.controller=null;
+  clearTimeout(rankingState.searchTimer);
+  Object.assign(rankingState,{page:1,pages:1,lastAttempt:0,lastUpdated:null,autoDate:true});
+  $('ranking-period').value='day';$('ranking-date-label').textContent='参考日期';$('ranking-date').value=beijingDay();$('ranking-date').max=beijingDay();
+  $('ranking-search').value='';$('ranking-unknown').checked=false;
+  $('ranking-rows').innerHTML='<tr><td colspan="9" class="empty">等待加载</td></tr>';
+  $('ranking-metrics').replaceChildren();$('ranking-page').textContent='';$('ranking-range').textContent='按北京时间统计，周一为每周起点。';
+  $('ranking-sync').textContent='等待加载';$('ranking-prev').disabled=true;$('ranking-next').disabled=true;$('ranking-refresh').disabled=false;
+}
+function refreshRankingIfDue(){
+  if(state.me?.role==='admin'&&state.view==='admin'&&state.adminTab==='ranking'&&!document.hidden&&!rankingState.controller&&Date.now()-rankingState.lastAttempt>=30000)void loadRanking();
+}
+async function loadRanking(){
+  if(state.me?.role!=='admin')return;
+  clearTimeout(rankingState.searchTimer);
+  $('ranking-date-label').textContent=$('ranking-period').value.startsWith('last_')?'截止日期':'参考日期';
+  $('ranking-date').max=beijingDay();if(rankingState.autoDate)$('ranking-date').value=beijingDay();
+  if(!$('ranking-date').reportValidity())return;
+  rankingState.controller?.abort();const controller=new AbortController();rankingState.controller=controller;
+  const epoch=++rankingState.epoch,uid=state.me.user_id;rankingState.lastAttempt=Date.now();
+  const query=new URLSearchParams({period:$('ranking-period').value,search:$('ranking-search').value.trim(),only_unknown:$('ranking-unknown').checked,page:rankingState.page});
+  if(!rankingState.autoDate)query.set('reference_date',$('ranking-date').value);
+  $('ranking-refresh').disabled=true;$('ranking-prev').disabled=true;$('ranking-next').disabled=true;
+  $('ranking-sync').textContent=rankingState.lastUpdated?'正在加载所选条件，下方暂为上次结果 · '+date(rankingState.lastUpdated):'正在加载排名…';
+  try{
+    const data=await api('/admin/usage-ranking?'+query,'GET',undefined,controller.signal);
+    if(epoch!==rankingState.epoch||state.me?.user_id!==uid)return;
+    rankingState.page=data.page;rankingState.pages=data.pages;rankingState.lastUpdated=data.generated_at;
+    if(rankingState.autoDate)$('ranking-date').value=data.reference_date;
+    $('ranking-range').textContent=`${data.start_date} 至 ${data.end_date}${data.period.startsWith('last_')?' · 滚动统计':''} · 北京时间 · 按请求开始时间归属周期`;
+    metrics('ranking-metrics',[['已知总Token',number(data.summary.total_tokens),'不含未知消耗',''],['模型请求次数',number(data.summary.requests),'已发出，主备切换按一个问题计','次'],['存在未知消耗',number(data.summary.unknown_usage),'有未返回用量的已结束尝试','次请求'],['等待用量返回',number(data.summary.pending_usage),'进行中，未当作零消耗','次请求']]);
+    $('ranking-rows').innerHTML=data.rows.length?data.rows.map(u=>{
+      const completeness=[u.unknown_usage?`<span class="badge orange">存在未知消耗 · ${number(u.unknown_usage)} 次</span>`:'',u.pending_usage?`<span class="badge">等待用量返回 · ${number(u.pending_usage)} 次</span>`:''].filter(Boolean).join(' ');
+      return `<tr><td>${number(u.rank)}</td><td>${esc(u.username)}${u.role==='admin'?' · 管理员':''}</td><td><span class="badge${u.active?' green':' orange'}">${u.active?'正常':'已暂停'}</span></td><td>${number(u.requests)}</td><td>${number(u.prompt_tokens)}</td><td>${number(u.completion_tokens)}</td><td><strong>${number(u.total_tokens)}</strong></td><td>${completeness||(!u.requests?'暂无调用':'已返回用量')}</td><td>${u.role!=='admin'?`<button type="button" data-ranking-edit="${esc(u.user_id)}">调整额度</button>`:'—'}</td></tr>`;
+    }).join(''):'<tr><td colspan="9" class="empty">没有符合条件的用户</td></tr>';
+    $('ranking-page').textContent=`共 ${number(data.users_total)} 人 · 第 ${data.page} / ${data.pages} 页 · 每页 ${data.page_size} 人`;
+    $('ranking-sync').textContent='已更新 · '+date(data.generated_at)+' · 页面可见时每30秒自动更新';
+  }catch(e){if(epoch===rankingState.epoch&&state.me?.user_id===uid&&e.name!=='AbortError')$('ranking-sync').textContent='排名更新失败，请重试'+(rankingState.lastUpdated?' · 已保留上次结果：'+date(rankingState.lastUpdated):'，暂无统计结果');}
+  finally{if(epoch===rankingState.epoch){rankingState.controller=null;$('ranking-refresh').disabled=false;$('ranking-prev').disabled=rankingState.page<=1;$('ranking-next').disabled=rankingState.page>=rankingState.pages;}}
+}
+for(const id of ['ranking-period','ranking-date','ranking-unknown'])$(id).addEventListener('change',()=>{if(id==='ranking-date')rankingState.autoDate=false;rankingState.page=1;void loadRanking();});
+$('ranking-search').addEventListener('input',()=>{clearTimeout(rankingState.searchTimer);rankingState.searchTimer=setTimeout(()=>{rankingState.page=1;void loadRanking();},300);});
+$('ranking-refresh').addEventListener('click',()=>void loadRanking());
+for(const [id,delta] of [['ranking-prev',-1],['ranking-next',1]])$(id).addEventListener('click',()=>{rankingState.page+=delta;void loadRanking();});
+$('ranking-rows').addEventListener('click',event=>{
+  const button=event.target.closest('[data-ranking-edit]');if(!button)return;
+  void busy(button,async()=>{
+    const uid=button.dataset.rankingEdit;
+    if(!state.admin.users.some(u=>u.id===uid)){
+      state.admin.users=(await api('/admin')).users;
+      $('policy-user').innerHTML=state.admin.users.filter(u=>u.role!=='admin').map(u=>`<option value="${esc(u.id)}">${esc(u.username)}</option>`).join('');
+    }
+    setAdminTab('users');$('policy-user').value=uid;fillUserPolicy();$('user-policy-form').querySelector('button[type=submit]').disabled=!$('policy-user').value;
+    $('user-policy-form').scrollIntoView({behavior:'smooth',block:'center'});
+  }).catch(e=>toast(e.message));
+});
+resetRanking();
+setInterval(refreshRankingIfDue,1000);
 const adminTabs=[...document.querySelectorAll('[data-admin-tab]')];
 adminTabs.forEach((tab,index)=>{
   tab.addEventListener('click',()=>setAdminTab(tab.dataset.adminTab));
@@ -366,11 +431,12 @@ form('binding-form',async(data,f)=>{
   f.elements.xiaomi_secret.value='';f.elements.xiaomi_secret.readOnly=true;
   data.delete('xiaomi_secret');
   try{
+    if(mode==='replace')await ensureRecent();
     state.login=await api(mode==='reverify'?'/xiaomi/reverify':mode==='replace'?'/xiaomi/replace':'/xiaomi/login','POST',payload);
     if(state.login.state==='already_valid'){resetBindingForm();state.me=await api('/me');toast(state.login.message);}
     else $('login-state').textContent=mode==='replace'?'正在验证新绑定账号，原绑定保持不变…':'正在重新绑定当前小米账号…';
     updateConnection();
-  }finally{f.elements.xiaomi_secret.value='';f.elements.xiaomi_secret.readOnly=true;}
+  }finally{payload.password='';f.elements.xiaomi_secret.value='';f.elements.xiaomi_secret.readOnly=true;}
 });
 form('otp-form',async(data,f)=>{await api('/xiaomi/code','POST',{job_id:state.login.id,code:data.get('code')});f.reset();$('otp-form').hidden=true;$('login-state').textContent='正在校验验证码…';});
 action('reverify-account',async()=>{
@@ -384,12 +450,13 @@ action('reverify-account',async()=>{
   }catch(e){$('account-action-state').textContent='检查未完成，请稍后重试；原有绑定保持不变。';throw e;}
   finally{state.checkingLogin=false;updateConnection();}
 });
-action('replace-account',async()=>{await ensureRecent();resetBindingForm();state.bindingMode='replace';state.bindingEditing=true;$('account-action-state').textContent='验证新绑定账号期间，现有绑定保持不变。';updateConnection();$('xiaomi-account-input').focus();});
+action('replace-account',async()=>{resetBindingForm();state.bindingMode='replace';state.bindingEditing=true;$('account-action-state').textContent='验证新绑定账号期间，现有绑定保持不变。';updateConnection();$('xiaomi-account-input').focus();});
 async function cancelAccountOperation(){
   const active=['logging_in','verification_required','verifying','awaiting_confirmation','applying'].includes(state.login?.state);
+  const mode=active?state.login.mode:state.bindingMode;
   const result=active?await api('/xiaomi/login','DELETE'):{state:'cancelled'};state.login=result.state==='completed'?result:null;
   resetBindingForm();$('otp-form').reset();$('otp-form').hidden=true;
-  const message=result.state==='completed'?'账号更新已完成，当前绑定已生效。':'已取消，原有绑定保持不变。';
+  const message=result.state==='completed'?'账号更新已完成，当前绑定已生效。':mode==='replace'?'已取消更换，原有绑定保持不变。':mode==='reverify'?'已取消本次操作，原有绑定保留。':'已暂缓绑定小米账号。';
   state.me=await api('/me');if(result.state==='completed')await fetchDevices(true);
   $('account-action-state').textContent=message;updateConnection();toast(message);
 }

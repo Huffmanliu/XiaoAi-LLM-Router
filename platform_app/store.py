@@ -58,6 +58,7 @@ class Store:
                 finish_reason TEXT, speech_status TEXT NOT NULL DEFAULT 'not_requested',
                 UNIQUE(user_id,source,request_id));
             CREATE INDEX IF NOT EXISTS request_owner_time ON requests(user_id,created);
+            CREATE INDEX IF NOT EXISTS request_usage_time ON requests(created) WHERE started=1;
             CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY, data TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS imports (fingerprint TEXT PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS user_emails (
@@ -88,6 +89,11 @@ class Store:
             ''')
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
+            if not db.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name='users_username_nocase'").fetchone():
+                # Preserve display names and ownership; never merge ambiguous legacy accounts.
+                if db.execute('SELECT 1 FROM users GROUP BY username COLLATE NOCASE HAVING COUNT(*)>1 LIMIT 1').fetchone():
+                    raise RuntimeError('平台用户名存在仅大小写不同的重名，请先由维护者确认归属并处理；不会自动合并账号')
+                db.execute('CREATE UNIQUE INDEX users_username_nocase ON users(username COLLATE NOCASE)')
             if not db.execute("SELECT 1 FROM migrations WHERE name='device-claims-v1'").fetchone():
                 for row in db.execute('SELECT id,COUNT(DISTINCT user_id) AS owners,MIN(user_id) AS owner FROM devices GROUP BY id').fetchall():
                     owner = row['owner'] if row['owners'] == 1 else '__conflict__'
@@ -227,7 +233,7 @@ class Store:
             if row['kind'] == 'reset':
                 uid = row['user_id']
                 owner = db.execute('SELECT username FROM users WHERE id=?', (uid,)).fetchone()
-                if not owner or owner[0] != username:
+                if not owner or owner[0].lower() != username.lower():
                     raise Rejected('平台账号与重置链接不匹配')
                 db.execute('UPDATE users SET password=? WHERE id=?', (hashed, uid))
                 db.execute('DELETE FROM sessions WHERE user_id=?', (uid,))

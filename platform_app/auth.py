@@ -252,7 +252,7 @@ class Auth:
             self.limit('login:' + data.username.lower(), 10, 600,
                        '平台登录尝试次数过多，请10分钟后再试；请确认填写的是平台注册用户名。')
             with store.db() as db:
-                row = db.execute('SELECT * FROM users WHERE username=?', (data.username,)).fetchone()
+                row = db.execute('SELECT * FROM users WHERE username=? COLLATE NOCASE', (data.username,)).fetchone()
             if not password_matches(data.password, row['password'] if row else self.dummy) or not row or not row['active']:
                 raise Rejected('平台账号、密码有误或服务已暂停。请使用平台注册用户名与平台密码。', 401)
             mail = self.email(row['id'])
@@ -283,7 +283,7 @@ class Auth:
             with store.db() as db:
                 invitation = db.execute("SELECT 1 FROM invites WHERE token=? AND kind='invite' AND used=0 AND expires>?",
                                         (digest(data.token), time.time())).fetchone()
-                taken = db.execute('SELECT 1 FROM users WHERE username=?', (data.username,)).fetchone()
+                taken = db.execute('SELECT 1 FROM users WHERE username=? COLLATE NOCASE', (data.username,)).fetchone()
                 email_taken = db.execute('SELECT 1 FROM user_emails WHERE email_key=?', (self.vault.fingerprint(address),)).fetchone()
             if not invitation or taken or email_taken:
                 raise Rejected('注册未完成，请检查邀请和账号信息；如曾注册，请使用忘记密码')
@@ -303,7 +303,7 @@ class Auth:
                     if row['purpose'] == 'register':
                         invite = db.execute("SELECT 1 FROM invites WHERE token=? AND kind='invite' AND used=0 AND expires>?",
                                             (p['invite'], time.time())).fetchone()
-                        taken = db.execute('SELECT 1 FROM users WHERE username=?', (p['username'],)).fetchone()
+                        taken = db.execute('SELECT 1 FROM users WHERE username=? COLLATE NOCASE', (p['username'],)).fetchone()
                         email_taken = db.execute('SELECT 1 FROM user_emails WHERE email_key=?', (row['target'],)).fetchone()
                         if invite and not taken and not email_taken:
                             uid = secrets.token_hex(16)
@@ -410,7 +410,7 @@ class Auth:
         async def password(data: Password, request: Request, user=Depends(current)):
             rate(request, 'password', 5)
             self.recent(user)
-            if data.username != user['username']:
+            if data.username.lower() != user['username'].lower():
                 raise Rejected('平台账号不匹配')
             encoded = password_hash(data.password)
             with store.db() as db:

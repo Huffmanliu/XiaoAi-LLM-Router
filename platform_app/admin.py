@@ -15,7 +15,7 @@ from .store import CST, Store
 
 def import_usage(store, username, path):
     with store.db() as db:
-        user = db.execute('SELECT id FROM users WHERE username=?', (username,)).fetchone()
+        user = db.execute('SELECT id FROM users WHERE username=? COLLATE NOCASE', (username,)).fetchone()
     if not user:
         raise ValueError('平台用户不存在，请先通过邀请创建')
     imported = skipped = 0
@@ -90,7 +90,7 @@ def main():
         print(json.dumps(import_usage(store, args.username, args.path)))
     elif args.command == 'set-recovery-email':
         with store.db() as db:
-            user = db.execute('SELECT id FROM users WHERE username=?', (args.username,)).fetchone()
+            user = db.execute('SELECT id FROM users WHERE username=? COLLATE NOCASE', (args.username,)).fetchone()
         if not user:
             parser.error('平台用户不存在')
         Auth(store).set_legacy_email(user['id'], args.email)

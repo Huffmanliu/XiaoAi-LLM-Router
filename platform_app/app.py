@@ -1,6 +1,7 @@
 """Same-origin web application. No Xiaomi secrets or transcript APIs for admins."""
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
+from datetime import date
 import fcntl
 import asyncio
 import json
@@ -12,10 +13,11 @@ from urllib.parse import urlsplit
 from typing import Literal
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_core import PydanticCustomError
 import yaml
@@ -25,6 +27,7 @@ from .routing import failure_match, normalized
 from .runtime import Runtime
 from .security import Vault, digest, masked_account
 from .store import Rejected, Store
+from .usage_ranking import ranking
 
 
 class Input(BaseModel):
@@ -466,6 +469,15 @@ def create_app(root=None, cfg=None, excluded=(), runtime_factory=Runtime, mailer
                 row['listening_count'] = runtime.listening_count(row['id'])
         return {'users': users, 'usage': store.summary(), 'defaults': store.defaults(),
                 'fallback_rules': store.fallback_rules(), 'capacity': runtime.capacity()}
+
+    @app.get('/api/admin/usage-ranking')
+    async def usage_ranking(period: Literal['day', 'week', 'month', 'last_3_months',
+                                            'last_6_months', 'last_year'] = 'day',
+                            reference_date: date | None = None, search: str = Query(default='', max_length=32),
+                            only_unknown: bool = False, page: int = Query(default=1, ge=1, le=1000000),
+                            user=Depends(admin)):
+        return await run_in_threadpool(ranking, store, period=period, reference_date=reference_date, search=search,
+                                       only_unknown=only_unknown, page=page)
 
     @app.get('/api/admin/capacity')
     async def capacity_status(user=Depends(admin)):
