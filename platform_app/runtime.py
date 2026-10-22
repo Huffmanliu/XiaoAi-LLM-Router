@@ -716,7 +716,7 @@ class Runtime:
             if source != 'speaker':
                 raise
             key = (uid, did)
-            if exc.status == 429 and time.time() - self.notice_at.get(key, 0) >= 60:
+            if exc.status in (402, 429) and time.time() - self.notice_at.get(key, 0) >= 60:
                 self.notice_at[key] = time.time()
                 await self.speak(speaker, did, str(exc), turn)
             return None

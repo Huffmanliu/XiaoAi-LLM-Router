@@ -23,6 +23,7 @@ from pydantic_core import PydanticCustomError
 import yaml
 
 from .auth import Auth
+from .billing import Billing
 from .routing import failure_match, normalized
 from .runtime import Runtime
 from .security import Vault, digest, masked_account
@@ -190,7 +191,7 @@ class Clear(Input):
     device_id: str = Field(min_length=1, max_length=128)
 
 
-def create_app(root=None, cfg=None, excluded=(), runtime_factory=Runtime, mailer=None):
+def create_app(root=None, cfg=None, excluded=(), runtime_factory=Runtime, mailer=None, payment_gateways=None):
     root = Path(root or os.environ.get('PLATFORM_STATE_DIR', 'deploy/local/platform'))
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     lock_handle = None
@@ -211,6 +212,7 @@ def create_app(root=None, cfg=None, excluded=(), runtime_factory=Runtime, mailer
     runtime = runtime_factory(store, cfg, excluded)
     rates = defaultdict(deque)
     auth = Auth(store, mailer)
+    billing = Billing(store, auth.origin, payment_gateways)
 
     @asynccontextmanager
     async def lifespan(app):
@@ -233,11 +235,14 @@ def create_app(root=None, cfg=None, excluded=(), runtime_factory=Runtime, mailer
                 f.write('平台账号：admin（英文 admin）\n密码：' + password + '\n首次登录后请修改密码。\n')
         await runtime.start()
         mail_task = asyncio.create_task(auth.deliver_notifications())
+        payment_task = asyncio.create_task(billing.background())
         try:
             yield
         finally:
             mail_task.cancel()
+            payment_task.cancel()
             await asyncio.gather(mail_task, return_exceptions=True)
+            await asyncio.gather(payment_task, return_exceptions=True)
             if auth.geo:
                 auth.geo.close()
             await runtime.close()
@@ -246,6 +251,7 @@ def create_app(root=None, cfg=None, excluded=(), runtime_factory=Runtime, mailer
 
     app = FastAPI(title='小爱 AI 控制台', lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.store, app.state.runtime, app.state.auth = store, runtime, auth
+    app.state.billing = billing
 
     @app.exception_handler(Rejected)
     async def rejected(request, exc):
@@ -271,10 +277,12 @@ def create_app(root=None, cfg=None, excluded=(), runtime_factory=Runtime, mailer
         if auth.origin and request.headers.get('host') != urlsplit(auth.origin).netloc:
             return JSONResponse({'error': '请求域名不匹配'}, status_code=400)
         write = request.method not in ('GET', 'HEAD', 'OPTIONS')
+        payment_notify = request.method == 'POST' and request.url.path in (
+            '/api/payments/notify/alipay', '/api/payments/notify/wechat')
         if write:
             origin = request.headers.get('origin')
             expected = os.environ.get('PLATFORM_PUBLIC_ORIGIN') or str(request.base_url).rstrip('/')
-            if origin != expected:
+            if not payment_notify and origin != expected:
                 return JSONResponse({'error': '请求来源不匹配'}, status_code=403)
             try:
                 size = int(request.headers.get('content-length', '0'))
@@ -332,6 +340,7 @@ def create_app(root=None, cfg=None, excluded=(), runtime_factory=Runtime, mailer
         return user
 
     auth.install(app, current, rate)
+    billing.install(app, current, admin, auth, rate)
 
     @app.get('/api/me')
     async def me(user=Depends(current)):

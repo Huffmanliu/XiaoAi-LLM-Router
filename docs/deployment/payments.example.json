@@ -1,0 +1,18 @@
+{
+  "alipay": {
+    "app_id": "YOUR_ALIPAY_APP_ID",
+    "seller_id": "YOUR_ALIPAY_SELLER_ID",
+    "private_key_file": "/etc/xiaoai-platform/payments/alipay-private.pem",
+    "alipay_public_key_file": "/etc/xiaoai-platform/payments/alipay-public.pem"
+  },
+  "wechat": {
+    "app_id": "YOUR_WECHAT_APP_ID",
+    "mch_id": "YOUR_WECHAT_MERCHANT_ID",
+    "merchant_serial": "YOUR_MERCHANT_CERTIFICATE_SERIAL",
+    "private_key_file": "/etc/xiaoai-platform/payments/wechat-private.pem",
+    "api_v3_key_file": "/etc/xiaoai-platform/payments/wechat-apiv3.key",
+    "wechat_public_keys": {
+      "PUB_KEY_ID_REPLACE_ME": "/etc/xiaoai-platform/payments/wechat-public.pem"
+    }
+  }
+}

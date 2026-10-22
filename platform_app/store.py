@@ -180,8 +180,21 @@ class Store:
         return {**DEFAULTS, **{k: v for k, v in data.items() if k in DEFAULTS}}
 
     def policy(self, uid):
-        u = self.user(uid)
-        return {**self.defaults(), **{k: v for k, v in json.loads(u['policy']).items() if k in DEFAULTS}}
+        with self.db() as db:
+            return self._policy(db, uid, time.time())
+
+    def _policy(self, db, uid, now):
+        u = db.execute('SELECT role,policy FROM users WHERE id=?', (uid,)).fetchone()
+        defaults = json.loads(db.execute('SELECT data FROM settings WHERE id=1').fetchone()[0])
+        custom = json.loads(u['policy'])
+        result = {**DEFAULTS, **{k: v for k, v in defaults.items() if k in DEFAULTS},
+                  **{k: v for k, v in custom.items() if k in DEFAULTS}}
+        if getattr(self, 'billing', None) and u['role'] != 'admin':
+            from .billing import active_grant
+            grant = active_grant(db, uid, now)
+            if grant:
+                result['daily_limit'] = min(grant['daily_limit'], custom.get('daily_limit', grant['daily_limit']))
+        return result
 
     def runtime_limits(self):
         with self.db() as db:
@@ -372,6 +385,10 @@ class Store:
         rid = secrets.token_hex(16)
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
+            if getattr(self, 'billing', None):
+                from .billing import check_access
+                check_access(db, uid, now)
+                policy = self._policy(db, uid, now)
             u = db.execute('SELECT active,role FROM users WHERE id=?', (uid,)).fetchone()
             if not u or not u[0]:
                 raise Rejected('服务已暂停', 403)
@@ -404,6 +421,12 @@ class Store:
 
     def started(self, rid):
         with self.db() as db:
+            db.execute('BEGIN IMMEDIATE')
+            if getattr(self, 'billing', None):
+                from .billing import check_access
+                row = db.execute('SELECT user_id,started FROM requests WHERE id=?', (rid,)).fetchone()
+                if row and not row['started']:
+                    check_access(db, row['user_id'], time.time())
             db.execute('UPDATE requests SET started=1 WHERE id=?', (rid,))
 
     def finish(self, rid, usage, **metadata):
