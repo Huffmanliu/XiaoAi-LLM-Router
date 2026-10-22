@@ -20,13 +20,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
       - name: Install dependencies
-        run: pip install -r requirements.txt pytest flake8
+        run: pip install -r requirements.txt pytest flake8 httpx
       - name: Lint
-        run: flake8 main.py miservice_glue.py llm_router.py memory.py mi_tts.py mi_conversation.py usage_ledger.py
+        run: flake8 main.py miservice_glue.py llm_router.py memory.py mi_tts.py mi_conversation.py usage_ledger.py platform_app
       - name: Unit tests (no credentials or live devices)
         run: python -m pytest tests/ -q
       - name: Syntax check
-        run: python -m compileall -q main.py miservice_glue.py llm_router.py memory.py mi_tts.py mi_conversation.py usage_ledger.py
+        run: python -m compileall -q main.py miservice_glue.py llm_router.py memory.py mi_tts.py mi_conversation.py usage_ledger.py platform_app
   container:
     runs-on: ubuntu-latest
     steps:
@@ -39,4 +39,4 @@ jobs:
       - name: Build and check imports
         run: |
           docker build -t xiaoai-llm-router:check .
-          docker run --rm -e LITELLM_LOCAL_MODEL_COST_MAP=True xiaoai-llm-router:check python -c 'import main, mi_conversation, usage_ledger'
+          docker run --rm -e LITELLM_LOCAL_MODEL_COST_MAP=True xiaoai-llm-router:check python -c 'import main, mi_conversation, usage_ledger, platform_app.app'

@@ -15,5 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # 再拷代码（v1.1 修正：v1.0 只挂 main.py 不挂模块文件 → 容器里 ModuleNotFoundError）
 COPY main.py miservice_glue.py llm_router.py memory.py mi_tts.py mi_conversation.py usage_ledger.py config.example.yaml ./
 
+COPY platform_app ./platform_app
+
 # 配置从卷或 env 注入，不在镜像里
 CMD ["python", "main.py"]

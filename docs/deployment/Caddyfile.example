@@ -1,0 +1,5 @@
+# Set PLATFORM_DOMAIN to your actual DNS hostname before starting Caddy.
+# Use an existing proxy when ports 80/443 are already occupied; do not replace it blindly.
+{$PLATFORM_DOMAIN} {
+    reverse_proxy 127.0.0.1:8765
+}

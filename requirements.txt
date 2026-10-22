@@ -14,3 +14,9 @@ python-dotenv>=1.0.0   # .env 注入密钥（可选，与 docker 环境变量二
 # edge-tts>=6.1.0
 # 测试
 # pytest>=8.0
+
+# Invitation-only web platform (legacy CLI remains available)
+fastapi==0.143.3
+uvicorn==0.54.0
+cryptography==50.0.2
+maxminddb==3.2.0  # Optional local city database reader; no external IP lookup

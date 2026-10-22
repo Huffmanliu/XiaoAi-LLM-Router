@@ -226,7 +226,7 @@ async def _consume_mqtt(cfg: dict, dedup: _BoundedDedup, poll_fallback: bool):
             evt = await loop_q.get()
             rec = _item(evt["_data"], fallback_device="unknown")
             if rec and dedup.accept(rec["session_id"], rec["ts"]):
-                log.debug("mqtt → %s: %s", rec["device_id"], rec["text"])
+                log.debug("mqtt conversation received for %s", rec["device_id"])
                 yield rec
         except asyncio.CancelledError:
             client.loop_stop()
@@ -290,7 +290,7 @@ async def _consume_poll(
                                 for _ in range(len(seen_ids) // 2):
                                     seen_ids.pop()
                         if dedup.accept(rid, item["ts"]):
-                            log.debug("poll → %s: %s", item["device_id"], item["text"])
+                            log.debug("poll conversation received for %s", item["device_id"])
                             yield item
                 else:
                     log.warning("poll: HTTP %s, backoff %.1fs", resp.status, backoff)

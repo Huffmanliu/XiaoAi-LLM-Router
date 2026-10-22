@@ -104,15 +104,14 @@ class Speaker:
             timeout = aiohttp.ClientTimeout(total=20)
             async with self.session.post(self._url(), json=payload, timeout=timeout) as resp:
                 if resp.status >= 400:
-                    log.error("TTS failed: HTTP %s %s", resp.status, await resp.text())
+                    log.error("TTS failed: HTTP %s", resp.status)
                 else:
                     log.info(
-                        "tts → %s: %s",
+                        "tts submitted → %s",
                         device_id,
-                        text[:30] + ("…" if len(text) > 30 else ""),
                     )
         except aiohttp.ClientError as e:
-            log.error("TTS unreachable: %s", e)
+            log.error("TTS unreachable (%s)", type(e).__name__)
 
     async def speak_chunks(self, device_id: str, answer: str, max_chars: int = 60) -> None:
         """把完整回复切成短句逐句播（main.py 非流式路径走这里）。"""

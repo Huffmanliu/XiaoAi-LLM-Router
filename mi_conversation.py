@@ -177,37 +177,38 @@ class MiSpeaker:
 
     # ---- 收音：拦截小爱最近一轮问答 ----
     async def latest_ask(self, device_id: str | None = None) -> dict | None:
-        """拉取小爱最近一轮"用户 query + 小爱回复"。
+        """Legacy CLI contract; the platform uses rich batches via recent_asks."""
+        items = await self.recent_asks(device_id)
+        if not items:
+            return None
+        latest = max(items, key=lambda item: item['ts'])
+        return {key: latest[key] for key in ('text', 'device_id', 'request_id', 'ts')}
 
-        device_id 为空 → 自动取 device_list 里第一台小爱音箱。
-        返回契约 dict（与 miservice_glue 一致，main.py 只认这个）：
-          {"text": 用户说的, "device_id":..., "request_id":..., "ts":...}
-        没有新问答 → None。
-        """
-        did = device_id or self.cfg.get("mi", {}).get("device_id") or await self._first_device()
+    async def recent_asks(self, device_id: str | None = None) -> list[dict]:
+        """Recent user queries and native answer text; never log or persist the raw records."""
+        did = device_id or self.cfg.get('mi', {}).get('device_id') or await self._first_device()
         if not did:
-            return None
-        if self.cfg.get("mi", {}).get("conversation_source") == "cloud":
-            return await self._cloud_latest_ask(did)
-        msgs = await self.mina.get_latest_ask(did)
-        if not msgs:
-            return None
-        # 取最新一条（list 按时间倒序或正序都兼容：取 timestamp 最大的）
-        m = max(msgs, key=lambda x: x.get("timestamp_ms", 0))
-        answers = (m.get("response") or {}).get("answer") or []
-        if not answers:
-            return None
-        q = next((a.get("question") for a in answers if a.get("question")), "")
-        if not q:
-            return None
-        return {
-            "text": q.strip(),
-            "device_id": did,
-            "request_id": m.get("request_id", ""),
-            "ts": m.get("timestamp_ms", 0) / 1000.0,
-        }
+            return []
+        if self.cfg.get('mi', {}).get('conversation_source') == 'cloud':
+            return await self._cloud_recent_asks(did)
+        messages = await self.mina.get_latest_ask(did) or []
+        result = []
+        for message in messages:
+            answers = (message.get('response') or {}).get('answer') or []
+            question = next((a.get('question') for a in answers if a.get('question')), '')
+            if question:
+                result.append({'text': question.strip(), 'device_id': did,
+                               'request_id': message.get('request_id', ''),
+                               'ts': message.get('timestamp_ms', 0) / 1000.0,
+                               'native_answer': ''.join(a.get('content', '') for a in answers
+                                                        if isinstance(a.get('content'), str))})
+        return result
 
     async def _cloud_latest_ask(self, device_id):
+        items = await self._cloud_recent_asks(device_id)
+        return max(items, key=lambda item: item['ts']) if items else None
+
+    async def _cloud_recent_asks(self, device_id):
         """Read the app's conversation history on devices with empty NLP buffers."""
         import aiohttp
 
@@ -234,7 +235,7 @@ class MiSpeaker:
                     "source": "dialogu",
                     "hardware": hardware,
                     "timestamp": str(int(time.time() * 1000)),
-                    "limit": 2,
+                    "limit": 10,
                 },
                 cookies=cookies,
                 timeout=aiohttp.ClientTimeout(total=15),
@@ -252,18 +253,24 @@ class MiSpeaker:
         body = data.get("data") or {}
         body = json.loads(body) if isinstance(body, str) else body
         records = body.get("records") or []
-        if not records:
-            return None
-        record = max(records, key=lambda r: r.get("time", 0))
-        text = (record.get("query") or "").strip()
-        if not text:
-            return None
-        return {
-            "text": text,
-            "device_id": device_id,
-            "request_id": record.get("requestId") or f"{device_id}:{record['time']}",
-            "ts": record["time"] / 1000.0,
-        }
+        result = []
+        for record in records:
+            text = (record.get('query') or '').strip()
+            if not text or not isinstance(record.get('time'), (int, float)):
+                continue
+            answers = record.get('answers') or []
+            native = ''.join(a[k]['text'] for a in answers if isinstance(a, dict)
+                             for k in ('tts', 'llm') if isinstance(a.get(k), dict)
+                             and isinstance(a[k].get('text'), str))
+            # Audio/action/unknown typed responses belong to native functions,
+            # even when accompanied by text that happens to match a failure rule.
+            eligible = all(isinstance(a, dict) and str(a.get('type') or '').upper() in ('', 'TTS', 'LLM')
+                           and not any(k in a for k in ('audio', 'action')) for a in answers)
+            result.append({'text': text, 'device_id': device_id,
+                           'request_id': record.get('requestId') or f"{device_id}:{record['time']}",
+                           'ts': record['time'] / 1000.0, 'native_answer': native,
+                           'takeover_allowed': eligible})
+        return result
 
     async def _first_device(self) -> str | None:
         """device_list 里找第一台小爱音箱（name 含 '小爱' 或 model 属 speaker）。"""
@@ -296,37 +303,51 @@ class MiSpeaker:
         return out
 
     # ---- 播报：让音箱念出 LLM 回复（v1.2 嘴）----
-    async def tts(self, device_id: str, text: str) -> bool:
+    async def tts(self, device_id: str, text: str, *, is_current=None) -> bool:
         text = (text or "").strip()
         max_chars = max(10, int(self.cfg.get("tts", {}).get("max_chunk_chars", 60)))
         chunks = [text] if text and len(text) <= max_chars else speech_chunks(text, max_chars)
         if len(chunks) > 1:
             log.info("tts split device=%s chars=%d chunks=%d", device_id, len(text), len(chunks))
         for index, chunk in enumerate(chunks):
-            if not await self._tts_once(device_id, chunk):
+            self._check_current(is_current)
+            kwargs = {'is_current': is_current} if is_current is not None else {}
+            if not await self._tts_once(device_id, chunk, **kwargs):
                 return False
-            if index + 1 < len(chunks):
+            self._check_current(is_current)
+            if index + 1 < len(chunks) or is_current is not None:
                 # These speakers return paused music state even while speaking.
                 # Use conservative pacing rather than treating that as TTS completion.
+                # Platform turns remain interruptible during the final chunk's
+                # estimated duration too. Legacy CLI submission timing is unchanged.
                 cps = max(1.0, float(self.cfg.get("tts", {}).get("chars_per_second", 3.5)))
                 await asyncio.sleep(1.0 + len(chunk) / cps)
+        self._check_current(is_current)
         return bool(chunks)
 
-    async def _tts_once(self, device_id: str, text: str) -> bool:
+    @staticmethod
+    def _check_current(is_current):
+        if asyncio.current_task().cancelling() or (is_current is not None and not is_current()):
+            raise asyncio.CancelledError
+
+    async def _tts_once(self, device_id: str, text: str, *, is_current=None) -> bool:
         """text_to_speech 播报。失败只打日志（不抛），念不出不中断对话流。"""
         text = (text or "").strip()
         if not text:
             return
         try:
+            self._check_current(is_current)
             if device_id in self.cfg.get("tts", {}).get("stop_music_before_speech", []):
                 if not await self.mina.player_stop(device_id):
                     raise RuntimeError("Could not stop music before speech")
+                self._check_current(is_current)
             if self.cfg.get("tts", {}).get("method") == "miot":
                 import miservice
 
                 if device_id not in self._miot_devices:
                     rows = await self.mina.device_list() or []
                     self._miot_devices = {d["deviceID"]: d for d in rows if d.get("deviceID")}
+                self._check_current(is_current)
                 device = self._miot_devices[device_id]
                 command = tier_of(device["hardware"])["tts"]
                 iid = tuple(int(part) for part in command.split("-"))
@@ -335,13 +356,13 @@ class MiSpeaker:
                 )
                 if code != 0:
                     raise RuntimeError(f"MIoT speech action failed, code={code}")
-                log.info("miot tts accepted → %s: %s", device_id, text[:40])
+                log.info("miot tts accepted → %s", device_id)
                 return True
             ok = await self.mina.text_to_speech(device_id, text)
-            log.info("tts → %s: %s", device_id, text[:30] + ("…" if len(text) > 30 else ""))
+            log.info("tts submitted → %s", device_id)
             if not ok:
                 log.warning("tts returned False for device %s", device_id)
             return bool(ok)
         except Exception as e:
-            log.error("tts failed: %s", e)
+            log.error("tts failed (%s)", type(e).__name__)
             return False

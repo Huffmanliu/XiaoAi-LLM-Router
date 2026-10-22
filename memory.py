@@ -32,7 +32,7 @@ class MemorySession:
 
     def __init__(self, max_turns: int = 10):
         # maxlen 单位是 message；max_turns 轮 × 2 = 最大 message 数
-        self.turns: deque[dict] = deque(maxlen=max(2, max_turns) * 2)
+        self.turns: deque[dict] = deque(maxlen=max(1, max_turns) * 2)
         self.last_active = time.time()
 
     def append(self, user: str, assistant: str) -> None:
@@ -80,7 +80,7 @@ class MemoryStore:
             self._sessions[device_id] = s
             return s
         # TTL 过期 → 删掉重建（而不是原地清空，顺带清掉僵尸 key）
-        if s.seconds_since_active() > self.ttl:
+        if s.seconds_since_active() >= self.ttl:
             del self._sessions[device_id]
             s = MemorySession(max_turns=self.max_turns)
             self._sessions[device_id] = s
@@ -90,7 +90,7 @@ class MemoryStore:
         """运维钩子：周期性清理过期 session（main 可每 60s 调一次）。
         返回被清理的 key 数。"""
         dead = [
-            d for d, s in self._sessions.items() if s.seconds_since_active() > self.ttl
+            d for d, s in self._sessions.items() if s.seconds_since_active() >= self.ttl
         ]
         for d in dead:
             del self._sessions[d]

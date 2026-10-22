@@ -1,0 +1,26 @@
+[Unit]
+Description=XiaoAi web platform and speaker workers
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=xiaoai-router
+Group=xiaoai-router
+WorkingDirectory=/opt/xiaoai-platform/current
+EnvironmentFile=/etc/xiaoai-platform/platform.env
+ExecStart=/opt/xiaoai-platform/current/.venv/bin/python -m platform_app --state-dir /var/lib/xiaoai-platform
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=60
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/xiaoai-platform /etc/xiaoai-platform
+
+[Install]
+WantedBy=multi-user.target

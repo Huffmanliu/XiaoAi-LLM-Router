@@ -175,7 +175,7 @@ class RouterPipeline:
         if not text:
             return
 
-        log.info("[%s] heard: %s", device, text)
+        log.info("[%s] new conversation received", device)
 
         # --- ① 唤醒词判定：没命中 → 放行给小爱原生应答，网关隐身 ---
         hit = match_wake(self.wake_words, text)
@@ -207,7 +207,7 @@ class RouterPipeline:
                     else:
                         await self.speaker.speak(device, chunk)
             except Exception as e:
-                log.error("[%s] LLM stream failed: %s", device, e)
+                log.error("[%s] LLM stream failed (%s)", device, type(e).__name__)
                 ok = False
             full_answer = "".join(buffered)
         else:
@@ -217,7 +217,7 @@ class RouterPipeline:
                     self.cfg, system, history, text, request_context=request_context
                 )
             except Exception as e:
-                log.error("[%s] LLM call failed: %s", device, e)
+                log.error("[%s] LLM call failed (%s)", device, type(e).__name__)
                 full_answer = ""
                 ok = False
 
@@ -246,10 +246,9 @@ class RouterPipeline:
 
         if ok:
             log.info(
-                "[%s] replied via %s: %s",
+                "[%s] replied via %s",
                 device,
                 (self.cfg.get("llm", {}) or {}).get("default_provider"),
-                full_answer[:60],
             )
 
 
@@ -329,7 +328,7 @@ async def _consume_conversation(sp, stop_event):
             try:
                 item = await sp.latest_ask(device)
             except Exception as e:
-                log.warning("conversation poll failed for %s: %s", device, e)
+                log.warning("conversation poll failed for %s (%s)", device, type(e).__name__)
                 retry_after[device] = time.monotonic() + 60
                 continue
             if item and item.get("request_id"):
@@ -423,7 +422,7 @@ async def main() -> None:
         except Exception as e:
             log.warning(
                 "conversation ingest unavailable (%s)%s",
-                e,
+                type(e).__name__,
                 "，回落 poll" if ingest == "auto" else "",
             )
             if ingest == "conversation":

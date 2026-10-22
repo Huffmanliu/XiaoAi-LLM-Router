@@ -9,6 +9,29 @@ import llm_router
 import main
 
 
+def test_platform_startup_keeps_raw_dependency_responses_out_of_logs(tmp_path, monkeypatch, caplog):
+    import logging
+    import uvicorn
+    from platform_app import __main__ as entry
+
+    logger = logging.getLogger('miservice')
+    monkeypatch.setattr(logger, 'disabled', True)
+    monkeypatch.setattr('sys.argv', ['platform_app', '--state-dir', str(tmp_path / 'platform')])
+    monkeypatch.setattr('platform_app.app.create_app', lambda: object())
+
+    def configure_without_serving(app, **options):
+        # Exercise the real server's logging setup, without opening a socket.
+        uvicorn.Config(app, log_config=options.get('log_config', uvicorn.config.LOGGING_CONFIG),
+                       log_level=options['log_level'])
+        logger.warning('SYNTHETIC-PRIVATE-AUTH-RESPONSE')
+
+    monkeypatch.setattr(uvicorn, 'run', configure_without_serving)
+    with caplog.at_level(logging.INFO):
+        entry.main()
+    assert logger.disabled
+    assert 'SYNTHETIC-PRIVATE-AUTH-RESPONSE' not in caplog.text
+
+
 def test_shared_mi_session_stays_open():
     async def run():
         account = SimpleNamespace(
