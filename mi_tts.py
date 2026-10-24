@@ -24,6 +24,9 @@ from __future__ import annotations
 
 import logging
 import re
+import ast
+import asyncio
+import json
 
 import aiohttp
 
@@ -31,6 +34,88 @@ log = logging.getLogger("xiaoai-router.tts")
 
 # MiService 的 TTS 接口路径（不同版本可能不同，在 config miservice.tts_path 里改）
 DEFAULT_TTS_PATH = "/api/v1/tts"
+
+
+class SpeechFailure(Exception):
+    """Content-free diagnosis; never retain upstream exception text or responses."""
+
+    STAGES = {'prepare': '准备播报', 'stop_music': '暂停音箱播放', 'device_list': '读取音箱设备',
+              'device_prepare': '准备音箱播报参数', 'miot_submit': '提交音箱播报指令',
+              'mina_submit': '提交音箱播报指令', 'wait': '等待播报间隔'}
+    KINDS = {'request_error': '小米接口未完成请求', 'rejected': '小米接口未接受指令',
+             'timeout': '请求超时', 'connection': '网络连接异常',
+             'verification': '小米账号需要验证', 'device_missing': '未找到目标音箱',
+             'device_metadata': '设备信息不完整', 'invalid_response': '接口返回格式异常'}
+
+    def __init__(self, stage='prepare', kind='request_error', code=None, http_status=None):
+        self.stage = stage if isinstance(stage, str) and stage in self.STAGES else 'prepare'
+        self.kind = kind if isinstance(kind, str) and kind in self.KINDS else 'request_error'
+        self.code = code if type(code) is int and -(2**31) <= code < 2**31 else None
+        self.http_status = http_status if type(http_status) is int and 100 <= http_status <= 599 else None
+        self.chunk_index = self.total_chunks = self.submitted_chunks = 0
+        super().__init__(self.STAGES[self.stage] + '失败：' + self.KINDS[self.kind])
+
+    @classmethod
+    def from_exception(cls, stage, exc):
+        if isinstance(exc, cls):
+            return exc
+        kind = 'request_error'
+        if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+            kind = 'timeout'
+        elif isinstance(exc, (aiohttp.ClientConnectionError, OSError)):
+            kind = 'connection'
+        elif type(exc).__name__ == 'VerificationRequired':
+            kind = 'verification'
+        code = getattr(exc, 'code', None)
+        # MiService wraps responses in a generic Exception. Parse only its known
+        # official endpoint envelope in memory; retain solely a top-level integer.
+        raw = str(exc)
+        if len(raw) <= 16384 and raw.startswith(('Error https://api2.mina.mi.com/', 'Error https://api.io.mi.com/')):
+            payload = raw.partition(': ')[2]
+            try:
+                try:
+                    response = json.loads(payload)
+                except ValueError:
+                    response = ast.literal_eval(payload)
+                if type(response) is dict:
+                    code = response.get('code')
+            except (ValueError, SyntaxError, RecursionError):
+                pass
+        return cls(stage, kind, code, getattr(exc, 'status', getattr(exc, 'status_code', None)))
+
+    def metadata(self):
+        keys = ('stage', 'kind', 'code', 'http_status', 'chunk_index', 'total_chunks', 'submitted_chunks')
+        return {key: getattr(self, key) for key in keys}
+
+    @property
+    def message(self):
+        message = str(self)
+        if self.chunk_index:
+            message = f'第{self.chunk_index}/{self.total_chunks}段：' + message
+        if self.submitted_chunks:
+            message += f'；此前{self.submitted_chunks}段指令已提交，不代表已播放完毕'
+        if self.code is not None:
+            message += f'（小米错误码 {self.code}）'
+        if self.http_status is not None:
+            message += f'（HTTP {self.http_status}）'
+        return message
+
+
+def public_speech_diagnostic(value):
+    """Validate stored metadata again before exposing it to a browser."""
+    try:
+        data = json.loads(value) if isinstance(value, str) else value
+    except (ValueError, TypeError):
+        return None
+    if (not isinstance(data, dict) or not isinstance(data.get('stage'), str)
+            or not isinstance(data.get('kind'), str) or data['stage'] not in SpeechFailure.STAGES
+            or data['kind'] not in SpeechFailure.KINDS):
+        return None
+    error = SpeechFailure(data['stage'], data['kind'], data.get('code'), data.get('http_status'))
+    for key in ('chunk_index', 'total_chunks', 'submitted_chunks'):
+        n = data.get(key, 0)
+        setattr(error, key, n if type(n) is int and 0 <= n <= 10000 else 0)
+    return {**error.metadata(), 'message': error.message}
 
 
 def split_sentences(text: str, max_chars: int = 60) -> list[str]:

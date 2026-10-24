@@ -3,6 +3,7 @@ import asyncio
 from copy import deepcopy
 from contextlib import asynccontextmanager
 import logging
+import json
 import secrets
 import time
 
@@ -14,6 +15,7 @@ import llm_router
 from main import RouterPipeline, match_wake
 from memory import MemoryStore
 from mi_conversation import MiSpeaker, tier_of
+from mi_tts import SpeechFailure
 from .device_policy import NATIVE_AI_REASON, hardware_code, native_ai
 from .capacity import ModelGate
 from .interruption import DeviceTurn, stop_requested, valid_records
@@ -85,10 +87,13 @@ class Runtime:
         self.text_locks = {}
         self.memory_versions = {}
         self.changing, self.checks, self.probe_locks = set(), {}, {}
+        self.binding_probes = {}
+        self.probe_gate = asyncio.Semaphore(4)
 
     async def start(self):
         self.store.cleanup()
-        self.background = [asyncio.create_task(self.supervise()), asyncio.create_task(self.clean_loop())]
+        self.background = [asyncio.create_task(self.supervise()), asyncio.create_task(self.clean_loop()),
+                           asyncio.create_task(self.binding_monitor())]
 
     async def close(self):
         self.stopping = True
@@ -96,7 +101,10 @@ class Runtime:
             job['task'].cancel()
         for task in self.background:
             task.cancel()
-        tasks = [*self.workers.values(), *(j['task'] for j in self.jobs.values()), *self.background]
+        for task in self.binding_probes.values():
+            task.cancel()
+        tasks = [*self.workers.values(), *(j['task'] for j in self.jobs.values()),
+                 *self.background, *self.binding_probes.values()]
         # Graceful shutdown is bounded; interrupted API calls remain charged/unknown.
         if tasks:
             done, pending = await asyncio.wait(tasks, timeout=20)
@@ -126,14 +134,16 @@ class Runtime:
     def _probe_result(status, data):
         if status == 401:
             return 'expired'
-        if not isinstance(data, dict):
+        if status != 200 or not isinstance(data, dict):
             return 'unknown'
         code = data.get('code')
-        if status == 200 and code == 0:
+        if type(code) is int and code == 0:
             return 'valid'
-        message = str(data.get('message') or data.get('msg') or '').lower()
+        message = data.get('message') or data.get('msg') or ''
+        message = message.lower() if isinstance(message, str) else ''
         if code in (401, '401') or (code != 0 and any(marker in message for marker in (
-                'invalid token', 'token expired', 'auth', 'not logged in', 'login required', '未登录', '登录失效', '登录过期'))):
+                'invalid token', 'token expired', 'invalid servicetoken', 'servicetoken expired',
+                'not logged in', 'login required', '未登录', '登录失效', '登录过期'))):
             return 'expired'
         return 'unknown'
 
@@ -170,7 +180,7 @@ class Runtime:
             saved = self.store.account(uid)
             if not saved:
                 raise Rejected('尚未绑定小米账号', 409)
-            identity = saved['identity']
+            identity, version = saved['identity'], saved['updated']
             ctx = self.accounts.get(uid)
             token = deepcopy(ctx['account'].token if ctx and ctx['account'].token
                              else saved['credentials']['token'])
@@ -178,17 +188,17 @@ class Runtime:
                 if not token.get('userId') or not token.get('micoapi'):
                     state = 'expired'
                 else:
-                    state = await asyncio.wait_for(self._probe_token(uid, token), timeout=20)
+                    async with self.probe_gate:
+                        state = await asyncio.wait_for(self._probe_token(uid, token), timeout=20)
             except (asyncio.TimeoutError, aiohttp.ClientError, ValueError, KeyError, TypeError, IndexError):
                 state = 'unknown'
             current = self.store.account(uid)
-            if not current or current['identity'] != identity:
+            if not current or current['identity'] != identity or current['updated'] != version:
                 raise Rejected('绑定已变化，请重新检查', 409)
             messages = {'valid': '当前小米账号绑定正常，无需重新绑定。',
                         'expired': '当前小米账号绑定已失效，请输入当前账号的密码重新绑定。',
                         'unknown': '暂时无法确认小米账号的绑定状态，请稍后重试；未发起重新绑定或发送验证码。'}
             result = {'state': state, 'checked_at': time.time(), 'message': messages[state]}
-            self.checks[uid] = {**result, 'identity': identity}
             if state == 'expired':
                 self.store.set_account_state(uid, 'needs_verification')
             elif state == 'valid':
@@ -197,14 +207,74 @@ class Runtime:
                     ctx['account'].token = token
                 if ctx:
                     ctx['state'] = 'ready'
+            self.checks[uid] = {**result, 'identity': identity, 'version': self.store.account(uid)['updated']}
             return result
 
     def last_check(self, uid):
         saved = self.store.account(uid)
         check = self.checks.get(uid)
-        if not saved or not check or check['identity'] != saved['identity']:
+        if not saved or not check or check['identity'] != saved['identity'] or check['version'] != saved['updated']:
             return None
-        return {k: v for k, v in check.items() if k != 'identity'}
+        return {k: v for k, v in check.items() if k not in ('identity', 'version')}
+
+    def connection_state(self, uid):
+        ctx = self.accounts.get(uid, {})
+        check = self.last_check(uid)
+        return ('connection_error' if ctx.get('state') == 'connection_error' or (check and check['state'] == 'unknown')
+                else ctx.get('state', 'idle'))
+
+    async def binding_monitor(self):
+        while not self.stopping:
+            try:
+                self.schedule_binding_checks()
+            except Exception:
+                log.warning('automatic binding status check unavailable')
+                await asyncio.sleep(5)
+            await asyncio.sleep(1)
+
+    def schedule_binding_checks(self):
+        """One metadata scan; at most four account probes, independent of browser tabs."""
+        for uid, task in list(self.binding_probes.items()):
+            if task.done():
+                if not task.cancelled():
+                    task.exception()  # Exceptions have been handled without logging upstream data.
+                self.binding_probes.pop(uid, None)
+        with self.store.db() as db:
+            rows = db.execute('SELECT a.user_id,a.identity,a.updated FROM accounts a JOIN users u '
+                              'ON u.id=a.user_id WHERE u.active=1 ORDER BY a.user_id').fetchall()
+        now = time.time()
+        for row in rows:
+            if self.stopping or len(self.binding_probes) >= 4:
+                break
+            uid = row['user_id']
+            job = self.jobs.get(uid)
+            lock = self.probe_locks.get(uid)
+            if (uid in self.binding_probes or uid in self.changing or (lock and lock.locked())
+                    or (job and (not job['task'].done() or job['state'] == 'awaiting_confirmation'))):
+                continue
+            check = self.checks.get(uid)
+            current = check and check['identity'] == row['identity'] and check['version'] == row['updated']
+            if current:
+                if check['state'] == 'expired':
+                    continue  # Only an explicit rebind changes an expired saved credential.
+                interval = 60 if (check['state'] == 'unknown'
+                                  or self.accounts.get(uid, {}).get('state') == 'connection_error') else 300
+                if now - check['checked_at'] < interval:
+                    continue
+            self.binding_probes[uid] = asyncio.create_task(self._automatic_binding_check(uid))
+
+    async def _automatic_binding_check(self, uid):
+        try:
+            await self.check_login(uid)
+        except Rejected:
+            pass  # Unbind/rebind raced this read; never apply its old result.
+        except Exception:
+            # Unexpected failures stay unknown and are retried, never labelled expired.
+            saved = self.store.account(uid)
+            if saved:
+                self.checks[uid] = {'state': 'unknown', 'checked_at': time.time(),
+                                    'message': '暂时无法访问小米服务，后台会自动重试；原绑定保留。',
+                                    'identity': saved['identity'], 'version': saved['updated']}
 
     def _begin(self, uid, username, password, mode):
         self.login_status(uid)  # Expire stale confirmation candidates first.
@@ -223,7 +293,7 @@ class Runtime:
 
     def begin_login(self, uid, username, password):
         if self.store.account(uid):
-            raise Rejected('已有绑定。请使用确认绑定状态或更换绑定账号入口', 409)
+            raise Rejected('已有绑定，系统会自动检查绑定状态。如需换号，请使用更换绑定账号入口', 409)
         return self._begin(uid, username, password, 'bind')
 
     async def begin_reverify(self, uid, password):
@@ -258,7 +328,7 @@ class Runtime:
                     raise Rejected('绑定验证失败；请检查信息，稍后重试绑定。原绑定保持不变。')
                 identity = self.store.assert_available(uid, account.token)
                 if job['mode'] == 'replace' and identity == job['expected_identity']:
-                    raise Rejected('这是当前已绑定的账号，无需更换，请使用确认绑定状态入口')
+                    raise Rejected('这是当前已绑定的账号，无需更换；系统会自动检查绑定状态')
                 if job['mode'] == 'reverify' and identity != job['expected_identity']:
                     raise Rejected('验证身份与当前绑定不一致，原绑定保持不变', 409)
                 raw_rows = await asyncio.wait_for(MiNAService(account).device_list(), timeout=30)
@@ -315,7 +385,8 @@ class Runtime:
                 if replacing:
                     self.memory.pop(uid, None)
                     self.memory_rules.pop(uid, None)
-                self.checks[uid] = {'identity': self.store.account(uid)['identity'], 'state': 'valid',
+                saved = self.store.account(uid)
+                self.checks[uid] = {'identity': saved['identity'], 'version': saved['updated'], 'state': 'valid',
                                     'checked_at': job.get('verified_at', time.time()), 'message': '小米账号已绑定'}
                 job.pop('candidate', None)
                 job.update(state='completed', message='切换成功，请主动选择新账号的音箱并确认。' if replacing
@@ -429,8 +500,8 @@ class Runtime:
         ctx = await self.context(uid)
         rows = await asyncio.wait_for(ctx['speaker'].mina.device_list(), timeout=30)
         if ctx['account'].token is None:
-            self.store.set_account_state(uid, 'needs_verification')
-            raise Rejected('小米账号绑定已失效，请重新绑定', 409)
+            ctx['state'] = 'connection_error'
+            raise Rejected('小米服务暂时无法访问，后台会自动检查；原绑定保留', 503)
         if rows is None:
             raise Rejected('设备列表暂不可用，请稍后重试', 502)
         self.store.sync_devices(uid, self.normalize_devices(rows))
@@ -621,9 +692,6 @@ class Runtime:
                 except asyncio.CancelledError:
                     raise
                 except Exception:
-                    if ctx['account'].token is None:
-                        self.store.set_account_state(uid, 'needs_verification')
-                        return
                     ctx['state'] = 'connection_error'
                     await asyncio.sleep(30)
                     continue
@@ -691,13 +759,14 @@ class Runtime:
             log.warning('device reply unavailable')
 
     @staticmethod
-    async def speak(speaker, did, text, turn):
+    async def speak(speaker, did, text, turn, *, diagnose=False):
+        kwargs = {'raise_on_error': True} if diagnose and isinstance(speaker, MiSpeaker) else {}
         if turn:
             turn.checkpoint()
-            result = await speaker.tts(did, text, is_current=turn.current)
+            result = await speaker.tts(did, text, is_current=turn.current, **kwargs)
             turn.checkpoint()
             return result
-        return await speaker.tts(did, text)
+        return await speaker.tts(did, text, **kwargs)
 
     async def handle(self, uid, did, text, source, request_id, speaker=None, *,
                      native_answer=None, observed_ts=None, queue_deadline=None, turn=None):
@@ -769,15 +838,21 @@ class Runtime:
                               elapsed_ms=round((time.monotonic() - t0) * 1000))
             self.store.save_history(uid, did, rid, text, answer, account_label=account_label, device_name=device_name)
         if speaker:
-            self.store.update_request(rid, speech_status='submitting')
+            self.store.update_request(rid, speech_status='submitting', speech_error=None)
             try:
-                ok = await self.speak(speaker, did, self.store.dialogue(uid)['answer_prefix'] + answer, turn)
+                ok = await self.speak(speaker, did, self.store.dialogue(uid)['answer_prefix'] + answer,
+                                      turn, diagnose=True)
+                if not ok:
+                    raise SpeechFailure('prepare', 'rejected')
             except asyncio.CancelledError:
                 self.store.update_request(rid, speech_status='interrupted')
                 raise
-            except BaseException:
-                self.store.update_request(rid, speech_status='failed')
-                raise
+            except Exception as exc:
+                error = SpeechFailure.from_exception('prepare', exc)
+                diagnostic = error.metadata()
+                self.store.update_request(rid, speech_status='failed', speech_error=diagnostic)
+                log.warning('speech failed request=%s diagnosis=%s', rid, json.dumps(diagnostic, sort_keys=True))
+                raise error from None
             self.store.update_request(rid, speech_status='submitted' if ok else 'failed')
         if (not speaker or ok) and (not turn or turn.current()):
             if (self.sessions(uid) is not None

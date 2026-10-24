@@ -7,6 +7,7 @@ import secrets
 import sqlite3
 import time
 
+from mi_tts import public_speech_diagnostic
 from .device_policy import NATIVE_AI_MODELS, NATIVE_AI_REASON, native_ai
 from .capacity import DEFAULT_LIMITS
 from .security import digest, password_hash
@@ -89,6 +90,8 @@ class Store:
             ''')
         with self.db() as db:
             db.execute('BEGIN IMMEDIATE')
+            if 'speech_error' not in {r['name'] for r in db.execute('PRAGMA table_info(requests)')}:
+                db.execute('ALTER TABLE requests ADD COLUMN speech_error TEXT')
             if not db.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name='users_username_nocase'").fetchone():
                 # Preserve display names and ownership; never merge ambiguous legacy accounts.
                 if db.execute('SELECT 1 FROM users GROUP BY username COLLATE NOCASE HAVING COUNT(*)>1 LIMIT 1').fetchone():
@@ -284,7 +287,8 @@ class Store:
 
     def set_account_state(self, uid, state):
         with self.db() as db:
-            db.execute('UPDATE accounts SET state=?,updated=? WHERE user_id=?', (state, time.time(), uid))
+            db.execute('UPDATE accounts SET state=?,updated=? WHERE user_id=? AND state!=?',
+                       (state, time.time(), uid, state))
 
     def devices(self, uid):
         with self.db() as db:
@@ -443,7 +447,10 @@ class Store:
                        (*updates.values(), rid))
 
     def update_request(self, rid, **updates):
-        assert set(updates) <= {'status', 'speech_status'}
+        assert set(updates) <= {'status', 'speech_status', 'speech_error'}
+        if 'speech_error' in updates:
+            diagnostic = public_speech_diagnostic(updates['speech_error'])
+            updates['speech_error'] = json.dumps({k: v for k, v in diagnostic.items() if k != 'message'}) if diagnostic else None
         with self.db() as db:
             db.execute('UPDATE requests SET ' + ','.join(k + '=?' for k in updates) + ' WHERE id=?',
                        (*updates.values(), rid))
@@ -525,6 +532,8 @@ class Store:
         with self.db() as db:
             requests = [dict(r) for r in db.execute(
                 'SELECT * FROM requests' + where + ' ORDER BY created DESC LIMIT 100', args)]
+            for row in requests:
+                row['speech_error'] = public_speech_diagnostic(row['speech_error'])
             totals = dict(db.execute(totals_sql + where, args).fetchone())
             today = db.execute(
                 'SELECT COUNT(*) FROM requests' + where + conjunction

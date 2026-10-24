@@ -33,7 +33,7 @@ import os
 import json
 import time
 import asyncio
-from mi_tts import speech_chunks
+from mi_tts import speech_chunks, SpeechFailure
 
 log = logging.getLogger("xiaoai-router.mina")
 
@@ -303,27 +303,35 @@ class MiSpeaker:
         return out
 
     # ---- 播报：让音箱念出 LLM 回复（v1.2 嘴）----
-    async def tts(self, device_id: str, text: str, *, is_current=None) -> bool:
-        text = (text or "").strip()
-        max_chars = max(10, int(self.cfg.get("tts", {}).get("max_chunk_chars", 60)))
-        chunks = [text] if text and len(text) <= max_chars else speech_chunks(text, max_chars)
-        if len(chunks) > 1:
-            log.info("tts split device=%s chars=%d chunks=%d", device_id, len(text), len(chunks))
-        for index, chunk in enumerate(chunks):
+    async def tts(self, device_id: str, text: str, *, is_current=None, raise_on_error=False) -> bool:
+        stage, index, submitted, chunks = 'prepare', 0, 0, []
+        try:
+            text = (text or "").strip()
+            max_chars = max(10, int(self.cfg.get("tts", {}).get("max_chunk_chars", 60)))
+            chunks = [text] if text and len(text) <= max_chars else speech_chunks(text, max_chars)
+            for index, chunk in enumerate(chunks, 1):
+                self._check_current(is_current)
+                stage = 'prepare'
+                kwargs = {'is_current': is_current} if is_current is not None else {}
+                if not await self._tts_once(device_id, chunk, **kwargs):
+                    raise SpeechFailure('prepare', 'rejected')
+                submitted += 1
+                self._check_current(is_current)
+                if index < len(chunks) or is_current is not None:
+                    # Submitted is not hardware-confirmed playback. Keep the final
+                    # estimate interruptible, just as the intervals between chunks.
+                    stage = 'wait'
+                    cps = max(1.0, float(self.cfg.get("tts", {}).get("chars_per_second", 3.5)))
+                    await asyncio.sleep(1.0 + len(chunk) / cps)
             self._check_current(is_current)
-            kwargs = {'is_current': is_current} if is_current is not None else {}
-            if not await self._tts_once(device_id, chunk, **kwargs):
-                return False
-            self._check_current(is_current)
-            if index + 1 < len(chunks) or is_current is not None:
-                # These speakers return paused music state even while speaking.
-                # Use conservative pacing rather than treating that as TTS completion.
-                # Platform turns remain interruptible during the final chunk's
-                # estimated duration too. Legacy CLI submission timing is unchanged.
-                cps = max(1.0, float(self.cfg.get("tts", {}).get("chars_per_second", 3.5)))
-                await asyncio.sleep(1.0 + len(chunk) / cps)
-        self._check_current(is_current)
-        return bool(chunks)
+            return bool(chunks)
+        except Exception as exc:
+            error = SpeechFailure.from_exception(stage, exc)
+            error.chunk_index, error.total_chunks, error.submitted_chunks = index, len(chunks), submitted
+            if raise_on_error:
+                raise error from None
+            log.error("speech failure diagnosis=%s", json.dumps(error.metadata(), sort_keys=True))
+            return False
 
     @staticmethod
     def _check_current(is_current):
@@ -331,38 +339,54 @@ class MiSpeaker:
             raise asyncio.CancelledError
 
     async def _tts_once(self, device_id: str, text: str, *, is_current=None) -> bool:
-        """text_to_speech 播报。失败只打日志（不抛），念不出不中断对话流。"""
+        """Submit one chunk; raise sanitized stage metadata to the per-call handler."""
         text = (text or "").strip()
         if not text:
-            return
+            return False
+        stage = 'prepare'
         try:
             self._check_current(is_current)
             if device_id in self.cfg.get("tts", {}).get("stop_music_before_speech", []):
+                stage = 'stop_music'
                 if not await self.mina.player_stop(device_id):
-                    raise RuntimeError("Could not stop music before speech")
+                    raise SpeechFailure(stage, 'rejected')
                 self._check_current(is_current)
             if self.cfg.get("tts", {}).get("method") == "miot":
                 import miservice
 
                 if device_id not in self._miot_devices:
-                    rows = await self.mina.device_list() or []
-                    self._miot_devices = {d["deviceID"]: d for d in rows if d.get("deviceID")}
+                    stage = 'device_list'
+                    rows = await self.mina.device_list()
+                    if not isinstance(rows, list):
+                        raise SpeechFailure(stage, 'invalid_response')
+                    self._miot_devices = {d["deviceID"]: d for d in rows
+                                          if isinstance(d, dict) and d.get("deviceID")}
                 self._check_current(is_current)
-                device = self._miot_devices[device_id]
-                command = tier_of(device["hardware"])["tts"]
+                stage = 'device_prepare'
+                device = self._miot_devices.get(device_id)
+                if device is None:
+                    raise SpeechFailure(stage, 'device_missing')
+                if not device.get('hardware') or not device.get('miotDID'):
+                    raise SpeechFailure(stage, 'device_metadata')
+                command = tier_of(device["hardware"]).get("tts")
+                if not command:
+                    raise SpeechFailure(stage, 'device_metadata')
                 iid = tuple(int(part) for part in command.split("-"))
+                stage = 'miot_submit'
                 code = await miservice.MiIOService(self.account).miot_action(
                     str(device["miotDID"]), iid, [text]
                 )
+                if type(code) is not int:
+                    raise SpeechFailure(stage, 'invalid_response')
                 if code != 0:
-                    raise RuntimeError(f"MIoT speech action failed, code={code}")
+                    raise SpeechFailure(stage, 'rejected', code=code)
                 log.info("miot tts accepted → %s", device_id)
                 return True
+            stage = 'mina_submit'
             ok = await self.mina.text_to_speech(device_id, text)
-            log.info("tts submitted → %s", device_id)
             if not ok:
-                log.warning("tts returned False for device %s", device_id)
-            return bool(ok)
-        except Exception as e:
-            log.error("tts failed (%s)", type(e).__name__)
-            return False
+                raise SpeechFailure(stage, 'rejected')
+            log.info("tts submitted → %s", device_id)
+            return True
+        except Exception as exc:
+            raise SpeechFailure.from_exception(stage, exc) from None

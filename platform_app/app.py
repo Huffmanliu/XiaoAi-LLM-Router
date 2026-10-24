@@ -345,14 +345,13 @@ def create_app(root=None, cfg=None, excluded=(), runtime_factory=Runtime, mailer
     @app.get('/api/me')
     async def me(user=Depends(current)):
         saved = store.account(user['user_id'])
-        ctx = runtime.accounts.get(user['user_id'], {})
         return {**{k: v for k, v in user.items() if k not in ('session_key', 'verified_at')},
                 'email_hint': masked_account(auth.email(user['user_id'])['email']),
                 'environment': os.environ.get('PLATFORM_ENVIRONMENT', '本机调试'),
                 'account_state': saved['state'] if saved else 'unbound',
                 'account_label': masked_account(saved['credentials']['username']) if saved else None,
                 'login_check': runtime.last_check(user['user_id']),
-                'connection_state': ctx.get('state', 'idle'), 'policy': store.policy(user['user_id']),
+                'connection_state': runtime.connection_state(user['user_id']), 'policy': store.policy(user['user_id']),
                 'retention_days': store.defaults()['retention_days'], 'dialogue': store.dialogue(user['user_id'])}
 
     @app.get('/api/usage')
@@ -371,7 +370,7 @@ def create_app(root=None, cfg=None, excluded=(), runtime_factory=Runtime, mailer
         except Rejected:
             raise
         except Exception:
-            raise Rejected('无法获取设备，请稍后重试或重新绑定小米账号', 502) from None
+            raise Rejected('暂时无法获取设备，后台会自动检查绑定状态；原绑定保留，请稍后重试', 502) from None
 
     @app.put('/api/devices')
     async def selection(data: Selection, user=Depends(current)):
