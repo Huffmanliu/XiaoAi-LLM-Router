@@ -8,8 +8,8 @@ import secrets
 import time
 
 import aiohttp
-from miservice import MiAccount, MiNAService
-from miservice.miaccount import UA_MINA
+from miservice import MiAccount, MiNAService, MiIOService
+from miservice.miaccount import UA_MINA, UA_MIIO
 
 import llm_router
 from main import RouterPipeline, match_wake
@@ -166,13 +166,34 @@ class Runtime:
                 return state
             devices = [d for d in self.store.devices(uid) if d['present'] and d['supported']
                        and d['id'] not in self.excluded]
-            if not devices:
-                return 'valid'
-            device = next((d for d in devices if d['enabled']), devices[0])
-            return await read('https://userprofile.mina.mi.com/device_profile/v2/conversation',
-                              {'source': 'dialogu', 'hardware': device['hardware'],
-                               'timestamp': str(int(time.time() * 1000)), 'limit': 1},
-                              {**cookies, 'deviceId': device['id']})
+            if devices:
+                device = next((d for d in devices if d['enabled']), devices[0])
+                state = await read('https://userprofile.mina.mi.com/device_profile/v2/conversation',
+                                   {'source': 'dialogu', 'hardware': device['hardware'],
+                                    'timestamp': str(int(time.time() * 1000)), 'limit': 1},
+                                   {**cookies, 'deviceId': device['id']})
+                if state != 'valid':
+                    return state
+            if self.base_cfg.get('tts', {}).get('method') == 'miot':
+                return await self._probe_miot_token(session, token)
+            return 'valid'
+
+    async def _probe_miot_token(self, session, token):
+        """Signed device metadata read only; never submit speech or auto-login."""
+        sid = token.get('xiaomiio')
+        if not token.get('deviceId') or not isinstance(sid, (list, tuple)) or len(sid) != 2 or not all(sid):
+            return 'expired'
+        data = MiIOService.sign_data('/home/device_list', {'getVirtualModel': False, 'getHuamiDevices': 0}, sid[0])
+        async with session.post('https://api.io.mi.com/app/home/device_list', data=data,
+                                cookies={'userId': str(token['userId']), 'serviceToken': sid[1],
+                                         'PassportDeviceId': token['deviceId']},
+                                headers={'User-Agent': UA_MIIO, 'x-xiaomi-protocal-flag-cli': 'PROTOCAL-HTTP2'},
+                                allow_redirects=False) as response:
+            try:
+                body = await response.json(content_type=None)
+            except (ValueError, TypeError):
+                body = None
+            return self._probe_result(response.status, body)
 
     async def check_login(self, uid):
         lock = self.probe_locks.setdefault(uid, asyncio.Lock())
@@ -334,6 +355,13 @@ class Runtime:
                 raw_rows = await asyncio.wait_for(MiNAService(account).device_list(), timeout=30)
                 if raw_rows is None:
                     raise Rejected('账号验证成功，但设备列表暂不可用，原绑定保持不变，请稍后重试')
+                if self.base_cfg.get('tts', {}).get('method') == 'miot':
+                    if not await asyncio.wait_for(account.login('xiaomiio'), timeout=240):
+                        raise Rejected('音箱播报授权验证未完成，请按提示重试绑定；原账号及设备选择保留')
+                    if self.store.assert_available(uid, account.token) != identity:
+                        raise Rejected('音箱读取与播报授权身份不一致，原绑定保持不变', 409)
+                    if await self._probe_miot_token(session, account.token) != 'valid':
+                        raise Rejected('音箱播报授权暂不可用，尚未更新绑定；请稍后重试，原账号及设备选择保留')
                 job['verified_at'] = time.time()
                 candidate = {'credentials': {'username': username, 'password': password, 'token': account.token},
                              'devices': self.normalize_devices(raw_rows)}
