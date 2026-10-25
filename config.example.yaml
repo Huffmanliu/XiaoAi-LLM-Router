@@ -36,6 +36,7 @@ tts:
   answer_prefix: 'Deepseek 回答：'
   max_chunk_chars: 60
   chars_per_second: 3.5
+  safety_margin_seconds: 1.0  # Wait estimate: chunk characters / rate + margin
   stop_music_before_speech: []  # Add deviceIDs here to stop music before speech
 
 # Optional: directory must already exist and be writable by the service user.

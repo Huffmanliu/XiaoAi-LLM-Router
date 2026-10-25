@@ -12,6 +12,7 @@ from .device_policy import NATIVE_AI_MODELS, NATIVE_AI_REASON, native_ai
 from .capacity import DEFAULT_LIMITS
 from .security import digest, password_hash
 from .routing import DEFAULT_DIALOGUE, SEED_RULES
+from .speech_settings import speech_settings
 
 CST = timezone(timedelta(hours=8))
 DEFAULTS = {'daily_limit': 50, 'minute_limit': 5, 'max_output_tokens': 1024,
@@ -203,6 +204,11 @@ class Store:
         with self.db() as db:
             data = json.loads(db.execute('SELECT data FROM settings WHERE id=1').fetchone()[0])
         return {**DEFAULT_LIMITS, **data.get('runtime_limits', {})}
+
+    def speech_settings(self, base=None):
+        with self.db() as db:
+            data = json.loads(db.execute('SELECT data FROM settings WHERE id=1').fetchone()[0])
+        return speech_settings(base, data.get('speech_settings'))
 
     def update_settings(self, values):
         with self.db() as db:

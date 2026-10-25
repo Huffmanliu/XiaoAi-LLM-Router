@@ -303,11 +303,17 @@ class MiSpeaker:
         return out
 
     # ---- 播报：让音箱念出 LLM 回复（v1.2 嘴）----
-    async def tts(self, device_id: str, text: str, *, is_current=None, raise_on_error=False) -> bool:
+    async def tts(self, device_id: str, text: str, *, is_current=None, raise_on_error=False,
+                  speech_settings=None) -> bool:
         stage, index, submitted, chunks = 'prepare', 0, 0, []
         try:
             text = (text or "").strip()
-            max_chars = max(10, int(self.cfg.get("tts", {}).get("max_chunk_chars", 60)))
+            # Snapshot once: updates must not change timing midway through an answer.
+            settings = dict(self.cfg.get('tts', {}))
+            settings.update(speech_settings or {})
+            max_chars = max(10, int(settings.get("max_chunk_chars", 60)))
+            cps = max(1.0, float(settings.get("chars_per_second", 3.5)))
+            margin = max(0.0, float(settings.get('safety_margin_seconds', 1.0)))
             chunks = [text] if text and len(text) <= max_chars else speech_chunks(text, max_chars)
             for index, chunk in enumerate(chunks, 1):
                 self._check_current(is_current)
@@ -321,8 +327,7 @@ class MiSpeaker:
                     # Submitted is not hardware-confirmed playback. Keep the final
                     # estimate interruptible, just as the intervals between chunks.
                     stage = 'wait'
-                    cps = max(1.0, float(self.cfg.get("tts", {}).get("chars_per_second", 3.5)))
-                    await asyncio.sleep(1.0 + len(chunk) / cps)
+                    await asyncio.sleep(margin + len(chunk) / cps)
             self._check_current(is_current)
             return bool(chunks)
         except Exception as exc:

@@ -23,6 +23,7 @@ from .model_services import ModelServices, TEST_RESULTS
 from .store import Rejected
 from .security import masked_account
 from .routing import failure_match
+from .xiaomi_otp import observe_response, recipient_method
 
 # The dependency can log raw authentication responses. Never forward those logs.
 for logger_name in ('miservice', 'LiteLLM', 'LiteLLM Router', 'LiteLLM Proxy', 'httpx', 'httpcore', 'openai'):
@@ -40,6 +41,14 @@ class SafeAccount(MiAccount):
         super().__init__(*args, **kwargs)
         self.interactive = interactive
         self.login_lock = asyncio.Lock()
+        self.otp_recipients = None
+
+    def request(self, url, method='GET', **kwargs):
+        request = super().request(url, method=method, **kwargs)
+        channel = recipient_method(url, method)
+        if self.otp_recipients is not None and channel:
+            return observe_response(request, self.otp_recipients, channel)
+        return request
 
     async def login(self, sid):
         async with self.login_lock:
@@ -49,7 +58,11 @@ class SafeAccount(MiAccount):
         # Stop BEFORE the library triggers a new SMS/email in unattended mode.
         if not self.interactive:
             raise VerificationRequired('User verification required')
-        return await super()._verify_otp(sid, ntf)
+        self.otp_recipients = {}
+        try:
+            return await super()._verify_otp(sid, ntf)
+        finally:
+            self.otp_recipients = None
 
 
 class TokenStore:
@@ -127,8 +140,11 @@ class Runtime:
         if job['state'] == 'awaiting_confirmation' and job.get('expires', 0) <= time.time():
             job.pop('candidate', None)
             job.update(state='expired', message='新账号验证已过期，原绑定保持不变，请重新开始')
-        return {k: job[k] for k in ('id', 'state', 'mode', 'method', 'message',
-                                    'old_label', 'new_label', 'device_count') if k in job}
+        fields = ('id', 'state', 'mode', 'method', 'message', 'old_label', 'new_label', 'device_count')
+        result = {k: job[k] for k in fields if k in job}
+        if job['state'] == 'verification_required':
+            result['recipient'] = job.get('recipient', '')
+        return result
 
     @staticmethod
     def _probe_result(status, data):
@@ -337,7 +353,9 @@ class Runtime:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
                 async def otp(method):
                     job['future'] = asyncio.get_running_loop().create_future()
-                    job.update(state='verification_required', method='短信' if method == 'Phone' else '邮箱')
+                    recipients = getattr(account, 'otp_recipients', None) or {}
+                    job.update(state='verification_required', method='短信' if method == 'Phone' else '邮箱',
+                               recipient=recipients.get(method, ''))
                     return await asyncio.wait_for(job['future'], timeout=180)
 
                 # Staged authentication MUST NOT persist tokens to the existing account.
@@ -555,6 +573,7 @@ class Runtime:
 
     def config(self, uid):
         cfg = deepcopy(self.base_cfg)
+        cfg.setdefault('tts', {}).update(self.store.speech_settings(cfg.get('tts')))
         cfg['llm']['stream'] = False
         cfg.pop('usage', None)  # Platform ledger is authoritative; no mixed legacy ledger.
         p = self.store.policy(uid)
@@ -787,8 +806,10 @@ class Runtime:
             log.warning('device reply unavailable')
 
     @staticmethod
-    async def speak(speaker, did, text, turn, *, diagnose=False):
+    async def speak(speaker, did, text, turn, *, diagnose=False, speech_settings=None):
         kwargs = {'raise_on_error': True} if diagnose and isinstance(speaker, MiSpeaker) else {}
+        if speech_settings is not None and isinstance(speaker, MiSpeaker):
+            kwargs['speech_settings'] = speech_settings
         if turn:
             turn.checkpoint()
             result = await speaker.tts(did, text, is_current=turn.current, **kwargs)
@@ -869,7 +890,7 @@ class Runtime:
             self.store.update_request(rid, speech_status='submitting', speech_error=None)
             try:
                 ok = await self.speak(speaker, did, self.store.dialogue(uid)['answer_prefix'] + answer,
-                                      turn, diagnose=True)
+                                      turn, diagnose=True, speech_settings=cfg['tts'])
                 if not ok:
                     raise SpeechFailure('prepare', 'rejected')
             except asyncio.CancelledError:

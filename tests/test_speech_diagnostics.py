@@ -105,7 +105,9 @@ def test_later_chunk_failure_keeps_usage_history_and_submitted_count(store, monk
     async def run():
         uid = store.create_user('alice', PASSWORD)
         bound(store, uid)
-        runtime = Runtime(store, deepcopy(CFG))
+        cfg = deepcopy(CFG)
+        cfg['tts']['max_chunk_chars'] = 10
+        runtime = Runtime(store, cfg)
         answer = '第一段用于模拟播报。第二段用于模拟失败。第三段不应再次发出。'
         model = AsyncMock(return_value=response(answer))
         monkeypatch.setattr(llm_router, 'acompletion', model)

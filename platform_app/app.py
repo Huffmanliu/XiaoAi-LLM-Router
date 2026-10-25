@@ -159,6 +159,12 @@ class Capacity(Input):
     queue_timeout: int = Field(ge=1, le=60, strict=True)
 
 
+class SpeechSettings(Input):
+    max_chunk_chars: int = Field(ge=10, le=100, strict=True)
+    chars_per_second: float = Field(ge=1, le=10, strict=True, allow_inf_nan=False)
+    safety_margin_seconds: float = Field(ge=0, le=10, strict=True, allow_inf_nan=False)
+
+
 class ModelService(Input):
     name: str = Field(min_length=1, max_length=60)
     provider: Literal['deepseek', 'qwen', 'qwen_intl', 'openai']
@@ -476,7 +482,8 @@ def create_app(root=None, cfg=None, excluded=(), runtime_factory=Runtime, mailer
                 row['device_count'] = db.execute('SELECT COUNT(*) FROM devices WHERE user_id=? AND present=1', (row['id'],)).fetchone()[0]
                 row['listening_count'] = runtime.listening_count(row['id'])
         return {'users': users, 'usage': store.summary(), 'defaults': store.defaults(),
-                'fallback_rules': store.fallback_rules(), 'capacity': runtime.capacity()}
+                'fallback_rules': store.fallback_rules(), 'capacity': runtime.capacity(),
+                'speech_settings': store.speech_settings(runtime.base_cfg.get('tts'))}
 
     @app.get('/api/admin/usage-ranking')
     async def usage_ranking(period: Literal['day', 'week', 'month', 'last_3_months',
@@ -490,6 +497,15 @@ def create_app(root=None, cfg=None, excluded=(), runtime_factory=Runtime, mailer
     @app.get('/api/admin/capacity')
     async def capacity_status(user=Depends(admin)):
         return runtime.capacity()
+
+    @app.get('/api/admin/speech-settings')
+    async def speech_settings_status(user=Depends(admin)):
+        return store.speech_settings(runtime.base_cfg.get('tts'))
+
+    @app.put('/api/admin/speech-settings')
+    async def update_speech_settings(data: SpeechSettings, user=Depends(admin)):
+        store.update_settings({'speech_settings': data.model_dump()})
+        return store.speech_settings(runtime.base_cfg.get('tts'))
 
     @app.get('/api/admin/model-services')
     async def model_services(user=Depends(admin)):

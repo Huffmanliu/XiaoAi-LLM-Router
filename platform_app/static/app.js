@@ -48,7 +48,7 @@ for(const name of ['xiaomi_account','xiaomi_secret']){
   const input=$('binding-form').elements.namedItem(name);
   input.addEventListener('focus',()=>{input.readOnly=false;});
 }
-function showAuth(){ if(typeof resetBilling==='function')resetBilling();resetRanking();resetBindingForm();$('model-service-form').reset();$('model-service-form').elements.id.value='';state.modelServices=[];state.modelTesting=null;state.historyEpoch++;$('history-list').replaceChildren();displayWorkspace(false); }
+function showAuth(){ $('speech-settings-form').reset();delete $('speech-settings-form').dataset.loaded; if(typeof resetBilling==='function')resetBilling();resetRanking();resetBindingForm();$('model-service-form').reset();$('model-service-form').elements.id.value='';state.modelServices=[];state.modelTesting=null;state.historyEpoch++;$('history-list').replaceChildren();displayWorkspace(false); }
 async function busy(button,work){if(button?.disabled)return;if(button)button.disabled=true;try{return await work();}finally{if(button)button.disabled=false;}}
 function action(id,work){$(id).addEventListener('click',()=>busy($(id),work).catch(e=>toast(e.message)));}
 function form(id,work){$(id).addEventListener('submit',e=>{e.preventDefault();const data=new FormData(e.target);busy(e.submitter||e.target.querySelector('button[type=submit]'),()=>work(data,e.target)).catch(e=>toast(e.message));});}
@@ -256,6 +256,7 @@ async function loadAdmin(){
   $('admin-users').innerHTML=users.map(u=>`<tr><td>${esc(u.username)}${u.role==='admin'?' · 管理员':''}</td><td><span class="badge${u.active?' green':' orange'}">${u.active?'正常':'已暂停'}</span></td><td>${number(u.listening_count)} / ${number(u.device_count)}</td><td>${u.today} / ${u.policy.daily_limit}</td><td>${u.role!=='admin'?`<button data-edit="${esc(u.id)}">规则</button> <button data-reset="${esc(u.id)}">重置密码</button>`:'—'}</td></tr>`).join('');
   $('policy-user').innerHTML=users.filter(u=>u.role!=='admin').map(u=>`<option value="${esc(u.id)}">${esc(u.username)}</option>`).join('');if(selected&&users.some(u=>u.id===selected))$('policy-user').value=selected;
   fill('capacity-form',state.admin.capacity.limits);renderCapacity(state.admin.capacity);
+  if(!$('speech-settings-form').dataset.loaded){fill('speech-settings-form',state.admin.speech_settings);$('speech-settings-form').dataset.loaded='true';speechSettingsExample();}
   fillUserPolicy();renderFailureRules();fill('defaults-form',defaults);requests('admin-requests',usage.requests,true);
   setAdminTab(state.adminTab);await loadModelServices();
   $('user-policy-form').querySelector('button[type=submit]').disabled=!$('policy-user').value;
@@ -376,6 +377,17 @@ form('model-service-form',async(data)=>{
   await ensureRecent();const id=data.get('id'),body={name:data.get('name'),provider:data.get('provider'),model:data.get('model'),priority:Number(data.get('priority')),enabled:data.has('enabled')};
   if(data.get('api_key').trim())body.api_key=data.get('api_key').trim();
   await api('/admin/model-services'+(id?'/'+encodeURIComponent(id):''),id?'PUT':'POST',body);await loadModelServices();newModelService();toast('模型服务已保存，可点击测试连接验证');
+});
+function speechSettingsExample(){
+  const f=$('speech-settings-form');
+  if(!f.checkValidity()){$('speech-settings-example').textContent='请按范围填写：每段10–100个字符，估算语速1–10字符／秒，安全余量0–10秒。';return;}
+  const n=Number(f.elements.max_chunk_chars.value),cps=Number(f.elements.chars_per_second.value),margin=Number(f.elements.safety_margin_seconds.value);
+  $('speech-settings-example').textContent=`示例：${n}个字符 ÷ ${cps}字符／秒 ＋ ${margin}秒 ≈ ${(n/cps+margin).toFixed(1)}秒后提交下一段。实际片段较短时，等待也相应缩短。`;
+}
+$('speech-settings-form').addEventListener('input',speechSettingsExample);
+form('speech-settings-form',async(data)=>{
+  const settings=await api('/admin/speech-settings','PUT',numeric(data,['max_chunk_chars','chars_per_second','safety_margin_seconds']));
+  fill('speech-settings-form',settings);speechSettingsExample();toast('分段播报设置已保存，下一条回答生效');
 });
 function renderCapacity(data){
   metrics('capacity-metrics',[["正在生成",number(data.active),'当前模型请求','条'],['等待处理',number(data.waiting),'包含同一音箱的待答问题','条'],['繁忙拒绝',number(data.rejected),'等待队列或单设备队列已满','次'],['等待超时',number(data.expired),'未调用模型','次']]);
@@ -528,7 +540,9 @@ document.querySelectorAll('[data-view]').forEach(el=>el.addEventListener('click'
 async function tick(){if(!state.me||document.hidden||state.refreshing)return;state.refreshing=true;try{
   state.me=await api('/me');const job=await api('/xiaomi/login');state.login=job;updateConnection();
   if(state.view==='devices'){
-    const messages={logging_in:'正在绑定小米账号…',verification_required:`需要${job.method||''}验证码，请在下方填写。`,verifying:'正在验证…',completed:job.message,awaiting_confirmation:job.message,applying:'正在应用账号更新，等待当前回答结束…',expired:job.message,failed:job.message,cancelled:'本次绑定已取消'};
+    const recipient=job.recipient||(job.method==='短信'?'小米账号绑定的安全手机（可能不是你当前使用的手机号）':'小米账号绑定的安全邮箱');
+    const otpMessage=`需要小米${job.method||''}验证码，请查看${recipient}收到的${job.method||'验证码'}，并在下方填写。这不是平台登录的邮箱验证码。`;
+    const messages={logging_in:'正在绑定小米账号…',verification_required:otpMessage,verifying:'正在验证…',completed:job.message,awaiting_confirmation:job.message,applying:'正在应用账号更新，等待当前回答结束…',expired:job.message,failed:job.message,cancelled:'本次绑定已取消'};
     $('login-state').textContent=messages[job.state]||'';$('otp-form').hidden=job.state!=='verification_required';
   }
   if(job.state==='completed'&&state.loginCompleted!==job.id){state.loginCompleted=job.id;resetBindingForm();state.me=await api('/me');updateConnection();await fetchDevices(true);$('account-action-state').textContent=job.message;toast(job.message||'账号更新完成');}
