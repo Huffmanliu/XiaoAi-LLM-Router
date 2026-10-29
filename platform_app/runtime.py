@@ -30,6 +30,8 @@ for logger_name in ('miservice', 'LiteLLM', 'LiteLLM Router', 'LiteLLM Proxy', '
     logging.getLogger(logger_name).disabled = True
 log = logging.getLogger(__name__)
 POLL_INTERVAL = 3
+BINDING_BACKOFF_AFTER = 120
+BINDING_RETRY_INTERVAL = 300
 
 
 class VerificationRequired(Exception):
@@ -51,6 +53,8 @@ class SafeAccount(MiAccount):
         return request
 
     async def login(self, sid):
+        if not self.interactive:
+            raise VerificationRequired('Explicit account binding required')
         async with self.login_lock:
             return await super().login(sid)
 
@@ -227,7 +231,7 @@ class Runtime:
                 else:
                     async with self.probe_gate:
                         state = await asyncio.wait_for(self._probe_token(uid, token), timeout=20)
-            except (asyncio.TimeoutError, aiohttp.ClientError, ValueError, KeyError, TypeError, IndexError):
+            except Exception:
                 state = 'unknown'
             current = self.store.account(uid)
             if not current or current['identity'] != identity or current['updated'] != version:
@@ -235,7 +239,11 @@ class Runtime:
             messages = {'valid': '当前小米账号绑定正常，无需重新绑定。',
                         'expired': '当前小米账号绑定已失效，请输入当前账号的密码重新绑定。',
                         'unknown': '暂时无法确认小米账号的绑定状态，请稍后重试；未发起重新绑定或发送验证码。'}
+            previous = self.last_check(uid)
             result = {'state': state, 'checked_at': time.time(), 'message': messages[state]}
+            if state == 'unknown':
+                result['unknown_since'] = (previous.get('unknown_since', result['checked_at'])
+                                           if previous and previous['state'] == 'unknown' else result['checked_at'])
             if state == 'expired':
                 self.store.set_account_state(uid, 'needs_verification')
             elif state == 'valid':
@@ -245,14 +253,26 @@ class Runtime:
                 if ctx:
                     ctx['state'] = 'ready'
             self.checks[uid] = {**result, 'identity': identity, 'version': self.store.account(uid)['updated']}
-            return result
+            return self.last_check(uid)
 
     def last_check(self, uid):
         saved = self.store.account(uid)
         check = self.checks.get(uid)
         if not saved or not check or check['identity'] != saved['identity'] or check['version'] != saved['updated']:
             return None
-        return {k: v for k, v in check.items() if k not in ('identity', 'version')}
+        result = {k: v for k, v in check.items() if k not in ('identity', 'version')}
+        interval = self.binding_retry_interval(uid, check, time.time())
+        persistent = check['state'] == 'unknown' and interval == BINDING_RETRY_INTERVAL
+        result.update(retry_interval=interval, can_reverify=check['state'] == 'expired' or persistent
+                      or saved['state'] == 'needs_verification',
+                      next_check_at=None if check['state'] == 'expired' else check['checked_at'] + interval)
+        return result
+
+    def binding_retry_interval(self, uid, check, now):
+        persistent = (check['state'] == 'unknown'
+                      and now - check.get('unknown_since', check['checked_at']) >= BINDING_BACKOFF_AFTER)
+        error = check['state'] == 'unknown' or self.accounts.get(uid, {}).get('state') == 'connection_error'
+        return 60 if error and not persistent else BINDING_RETRY_INTERVAL
 
     def connection_state(self, uid):
         ctx = self.accounts.get(uid, {})
@@ -294,8 +314,7 @@ class Runtime:
             if current:
                 if check['state'] == 'expired':
                     continue  # Only an explicit rebind changes an expired saved credential.
-                interval = 60 if (check['state'] == 'unknown'
-                                  or self.accounts.get(uid, {}).get('state') == 'connection_error') else 300
+                interval = self.binding_retry_interval(uid, check, now)
                 if now - check['checked_at'] < interval:
                     continue
             self.binding_probes[uid] = asyncio.create_task(self._automatic_binding_check(uid))
@@ -306,12 +325,8 @@ class Runtime:
         except Rejected:
             pass  # Unbind/rebind raced this read; never apply its old result.
         except Exception:
-            # Unexpected failures stay unknown and are retried, never labelled expired.
-            saved = self.store.account(uid)
-            if saved:
-                self.checks[uid] = {'state': 'unknown', 'checked_at': time.time(),
-                                    'message': '暂时无法访问小米服务，后台会自动重试；原绑定保留。',
-                                    'identity': saved['identity'], 'version': saved['updated']}
+            # Never attach an unexpected old result to a newly installed binding.
+            log.warning('automatic binding status check unavailable')
 
     def _begin(self, uid, username, password, mode):
         self.login_status(uid)  # Expire stale confirmation candidates first.
@@ -338,7 +353,7 @@ class Runtime:
         result = await self.check_login(uid)
         if result['state'] == 'valid':
             return {'state': 'already_valid', 'message': result['message']}
-        if result['state'] != 'expired':
+        if result['state'] != 'expired' and not result['can_reverify']:
             raise Rejected(result['message'], 503)
         saved = self.store.account(uid)
         return self._begin(uid, saved['credentials']['username'], password, 'reverify')
@@ -704,6 +719,7 @@ class Runtime:
 
     async def device_loop(self, uid, did):
         started, seen, pending = time.time(), {}, {}
+        failure_since = None
         # A device retains only the latest interaction, never a backlog of old answers.
         queue = asyncio.Queue(maxsize=1)
         turn = DeviceTurn()
@@ -742,8 +758,13 @@ class Runtime:
                     raise
                 except Exception:
                     ctx['state'] = 'connection_error'
-                    await asyncio.sleep(30)
+                    if failure_since is None:
+                        failure_since = time.monotonic()
+                    delay = (BINDING_RETRY_INTERVAL
+                             if time.monotonic() - failure_since >= BINDING_BACKOFF_AFTER else 30)
+                    await self._poll_pause(uid, did, delay)
                     continue
+                failure_since = None
                 ctx['state'] = 'ready'
                 await asyncio.sleep(POLL_INTERVAL)
         except asyncio.CancelledError:
@@ -761,6 +782,15 @@ class Runtime:
                 else:
                     queue.put_nowait(None)
                 await asyncio.gather(responder, return_exceptions=True)
+
+    async def _poll_pause(self, uid, did, delay):
+        # Rebind/unbind can finish promptly even during a five-minute outage pause.
+        deadline = time.monotonic() + delay
+        while not self.stopping and self.enabled(uid, did):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(1, remaining))
 
     async def reply_loop(self, uid, did, speaker, queue, turn=None):
         """Join cancelled turns before starting the next, without stopping polling."""

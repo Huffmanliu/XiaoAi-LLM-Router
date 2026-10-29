@@ -10,6 +10,7 @@ import pytest
 from platform_app.runtime import Runtime
 from platform_app.store import Rejected
 from test_account_lifecycle import account_store as account_store_fixture
+from test_account_lifecycle import complete, mock_auth
 from test_capacity import eventually
 from test_platform import CFG, PASSWORD, bound
 
@@ -269,4 +270,138 @@ def test_missing_in_memory_token_is_not_itself_proof_of_expiration(account_store
         assert store.account(uid)['state'] == 'ready'
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('unexpected', [False, True])
+def test_continuous_failure_slows_after_two_minutes_and_recovers(account_store, monkeypatch, unexpected):
+    store, uid = account_store
+    clock = [1000.0]
+    monkeypatch.setattr('platform_app.runtime.time', SimpleNamespace(time=lambda: clock[0]))
+    async def run():
+        runtime = Runtime(store, deepcopy(CFG))
+        probe = AsyncMock(side_effect=RuntimeError('PRIVATE') if unexpected else None, return_value='unknown')
+        monkeypatch.setattr(runtime, '_probe_token', probe)
+        for at in (1000, 1060):
+            clock[0] = at
+            runtime.schedule_binding_checks()
+            await settle(runtime)
+            assert runtime.last_check(uid)['retry_interval'] == 60
+            assert not runtime.last_check(uid)['can_reverify']
+        clock[0] = 1120
+        runtime.schedule_binding_checks()
+        assert not runtime.binding_probes and probe.await_count == 2
+        check = runtime.last_check(uid)
+        assert check['unknown_since'] == 1000 and check['can_reverify']
+        assert check['retry_interval'] == 300 and check['next_check_at'] == 1360
+        clock[0] = 1359
+        runtime.schedule_binding_checks()
+        assert not runtime.binding_probes
+        clock[0] = 1360
+        runtime.schedule_binding_checks()
+        await settle(runtime)
+        assert probe.await_count == 3 and runtime.last_check(uid)['unknown_since'] == 1000
+        probe.side_effect, probe.return_value = None, 'valid'
+        clock[0] = 1660
+        runtime.schedule_binding_checks()
+        await settle(runtime)
+        assert runtime.last_check(uid)['state'] == 'valid'
+        assert not runtime.last_check(uid)['can_reverify']
+        assert 'unknown_since' not in runtime.last_check(uid)
+        probe.return_value = 'unknown'
+        clock[0] = 1960
+        await runtime.check_login(uid)
+        assert runtime.last_check(uid)['unknown_since'] == 1960
+        assert runtime.last_check(uid)['retry_interval'] == 60
+        assert not runtime.jobs and store.devices(uid)[0]['enabled']
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('success', [True, False])
+def test_user_can_rebind_persistent_unknown_without_losing_selected_devices(account_store, monkeypatch, success):
+    store, uid = account_store
+    before = store.account(uid)['credentials']
+    captured = mock_auth(monkeypatch, identity=before['token']['userId'], success=success)
+    monkeypatch.setattr('platform_app.runtime.MiNAService', lambda account: SimpleNamespace(
+        device_list=AsyncMock(return_value=[{'deviceID': 'speaker-a', 'hardware': 'L05B', 'name': 'Play'},
+                                          {'deviceID': 'new-device', 'hardware': 'L05B', 'name': 'New'}])))
+    clock = [1000.0]
+    monkeypatch.setattr('platform_app.runtime.time', SimpleNamespace(time=lambda: clock[0]))
+    async def run():
+        runtime = Runtime(store, deepcopy(CFG))
+        monkeypatch.setattr(runtime, '_probe_token', AsyncMock(return_value='unknown'))
+        await runtime.check_login(uid)
+        with pytest.raises(Rejected) as exc:
+            await runtime.begin_reverify(uid, 'synthetic-new-password')
+        assert exc.value.status == 503 and not captured
+        clock[0] += 120
+        await runtime.begin_reverify(uid, 'synthetic-new-password')
+        assert (await complete(runtime, uid))['state'] == ('completed' if success else 'failed')
+        assert next(d for d in store.devices(uid) if d['id'] == 'speaker-a')['enabled']
+        if success:
+            assert not next(d for d in store.devices(uid) if d['id'] == 'new-device')['enabled']
+            assert store.account(uid)['credentials']['password'] == 'synthetic-new-password'
+            assert runtime.last_check(uid)['state'] == 'valid'
+        else:
+            assert store.account(uid)['credentials'] == before
+    asyncio.run(run())
+    assert captured == [(before['username'], 'synthetic-new-password')]
+
+
+def test_credential_change_does_not_inherit_unknown_backoff(account_store, monkeypatch):
+    store, uid = account_store
+    clock = [1000.0]
+    monkeypatch.setattr('platform_app.runtime.time', SimpleNamespace(time=lambda: clock[0]))
+    async def run():
+        runtime = Runtime(store, deepcopy(CFG))
+        monkeypatch.setattr(runtime, '_probe_token', AsyncMock(return_value='unknown'))
+        await runtime.check_login(uid)
+        clock[0] += 120
+        assert runtime.last_check(uid)['can_reverify']
+        saved = store.account(uid)['credentials']
+        store.save_account(uid, saved['username'], 'synthetic-new-password', saved['token'])
+        await runtime.check_login(uid)
+        assert not runtime.last_check(uid)['can_reverify']
+        assert runtime.last_check(uid)['unknown_since'] == clock[0]
+    asyncio.run(run())
+
+
+def test_device_reads_back_off_and_pause_can_end_on_rebind(account_store, monkeypatch):
+    store, uid = account_store
+    clock, delays = [1000.0], []
+    monkeypatch.setattr('platform_app.runtime.time', SimpleNamespace(time=lambda: clock[0], monotonic=lambda: clock[0]))
+    async def run():
+        runtime = Runtime(store, deepcopy(CFG))
+        reads = AsyncMock(side_effect=RuntimeError('synthetic outage'))
+        ctx = {'state': 'ready', 'speaker': SimpleNamespace(recent_asks=reads)}
+        monkeypatch.setattr(runtime, 'context', AsyncMock(return_value=ctx))
+        async def pause(user, device, delay):
+            delays.append(delay)
+            clock[0] += delay
+            if delay == 300:
+                runtime.stopping = True
+        monkeypatch.setattr(runtime, '_poll_pause', pause)
+        await runtime.device_loop(uid, 'speaker-a')
+        assert delays == [30, 30, 30, 30, 300] and reads.await_count == 5
+        runtime.stopping = False
+        runtime.changing.add(uid)
+        # The real wait exits immediately when the current account is being rebound.
+        await asyncio.wait_for(Runtime._poll_pause(runtime, uid, 'speaker-a', 300), timeout=0.5)
+        assert store.devices(uid)[0]['enabled']
+    asyncio.run(run())
+
+
+def test_background_library_relogin_never_submits_password(monkeypatch):
+    from miservice import MiAccount
+    from platform_app.runtime import SafeAccount, VerificationRequired
+    login = AsyncMock(return_value=True)
+    monkeypatch.setattr(MiAccount, 'login', login)
+    async def run():
+        account = SafeAccount(SimpleNamespace(), 'synthetic', 'synthetic')
+        with pytest.raises(VerificationRequired):
+            await account.login('micoapi')
+        assert not login.await_count
+        account.interactive = True
+        assert await account.login('micoapi')
+        assert login.await_count == 1
     asyncio.run(run())
