@@ -506,6 +506,8 @@ class Runtime:
                 continue
             supported = tier['tier'] in ('perfect', 'normal')
             reason = '' if supported else (tier.get('note') or '该机型尚未验证兼容，暂不可启用')
+            if tier['tier'] == 'unknown':
+                reason = '该机型尚未验证兼容，暂不开放接入'
             if native_ai(hw):
                 supported, reason = False, NATIVE_AI_REASON
             if did in self.excluded:

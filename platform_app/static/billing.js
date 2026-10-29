@@ -39,6 +39,10 @@ function renderPaymentOrder(order){
   $('payment-order-area').hidden=false;$('payment-order-state').textContent=orderState(order)+(order.note?' · '+order.note:'');
   $('payment-qr').hidden=!order.qr_available;
   if(order.qr_available)$('payment-qr').src='/api/billing/orders/'+encodeURIComponent(order.id)+'/qr';else $('payment-qr').removeAttribute('src');
+  $('payment-instructions').textContent=order.page_payment_available?'点击前往支付宝付款，在新页面完成支付。付款结果由服务端核验，此页面不会自动续费。':'请用所选支付应用扫码。二维码有效期15分钟，付款结果由服务端核验后自动更新；此页面不会发起自动续费。';
+  $('payment-page-link').hidden=!order.page_payment_available;
+  if(order.page_payment_available)$('payment-page-link').href='/api/billing/orders/'+encodeURIComponent(order.id)+'/pay';else $('payment-page-link').removeAttribute('href');
+  $('payment-cancel-order').hidden=!order.page_payment_available;
   $('payment-query').hidden=['closed','refunded'].includes(order.state);
 }
 form('payment-checkout-form',async data=>{
@@ -94,3 +98,5 @@ setInterval(async()=>{
  if(!watching&&(state.view!=='billing'||Date.now()-billingState.lastRefresh<30000))return;
  billingState.busy=true;try{if(watching)await queryPayment();else await loadBilling();}catch(e){if(e.status!==401&&state.view==='billing')$('billing-status').textContent='更新暂时失败，保留上次结果，请稍后刷新。';}finally{billingState.busy=false;}
 },4000);
+
+action('payment-cancel-order',async()=>{const order=billingState.order;if(!order)return;if(!await confirmation('关闭未支付订单？','会先向支付宝核对付款状态；已付款订单保留，未付款订单确认关闭后不能继续付款。'))return;const updated=await api('/billing/orders/'+encodeURIComponent(order.id)+'/close','POST');if(billingState.order?.id===order.id){billingState.order=updated;renderPaymentOrder(updated);}await loadBilling();});

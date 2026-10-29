@@ -21,7 +21,7 @@ const state = {me:null, csrf:'', deviceSaving:false, adminTab:'users', modelServ
 const rankingState={page:1,pages:1,epoch:0,controller:null,lastAttempt:0,lastUpdated:null,autoDate:true};
 const labels = {overview:['概览','一切尽在掌握'], devices:['我的设备','选择连接，让 AI 就位'],
   history:['对话历史','留住每一次好奇'], dialogue:['对话设置','让回答更合你的心意'],
-  billing:['套餐与订单','服务与购买记录'], admin:['管理后台','关注运行，尊重隐私'], account:['账号与安全','安心使用，从这里开始']};
+  billing:['套餐与订单','服务与购买记录'], help:['帮助与反馈','使用指引与问题处理'], admin:['管理后台','关注运行，尊重隐私'], account:['账号与安全','安心使用，从这里开始']};
 const statusName = {completed:'模型已返回', failed:'请求失败', interrupted:'请求中断', reserved:'处理中', cancelled:'未发出',
   submitted:'指令已提交', submitting:'提交中', not_requested:'不播报', unknown:'历史未记录', ready:'已绑定', unbound:'未绑定小米账号',
   needs_verification:'需要重新绑定', connection_error:'小米服务访问异常', idle:'待连接'};
@@ -48,7 +48,7 @@ for(const name of ['xiaomi_account','xiaomi_secret']){
   const input=$('binding-form').elements.namedItem(name);
   input.addEventListener('focus',()=>{input.readOnly=false;});
 }
-function showAuth(){ $('speech-settings-form').reset();delete $('speech-settings-form').dataset.loaded; if(typeof resetBilling==='function')resetBilling();resetRanking();resetBindingForm();$('model-service-form').reset();$('model-service-form').elements.id.value='';state.modelServices=[];state.modelTesting=null;state.historyEpoch++;$('history-list').replaceChildren();displayWorkspace(false); }
+function showAuth(){ if(typeof resetSupportHelp==='function')resetSupportHelp(); if(typeof resetAdminFeedback==='function')resetAdminFeedback(); $('speech-settings-form').reset();delete $('speech-settings-form').dataset.loaded; if(typeof resetBilling==='function')resetBilling();resetRanking();resetBindingForm();$('model-service-form').reset();$('model-service-form').elements.id.value='';state.modelServices=[];state.modelTesting=null;state.historyEpoch++;$('history-list').replaceChildren();displayWorkspace(false); }
 async function busy(button,work){if(button?.disabled)return;if(button)button.disabled=true;try{return await work();}finally{if(button)button.disabled=false;}}
 function action(id,work){$(id).addEventListener('click',()=>busy($(id),work).catch(e=>toast(e.message)));}
 function form(id,work){$(id).addEventListener('submit',e=>{e.preventDefault();const data=new FormData(e.target);busy(e.submitter||e.target.querySelector('button[type=submit]'),()=>work(data,e.target)).catch(e=>toast(e.message));});}
@@ -77,8 +77,8 @@ function updateDeviceSaveState(){
 }
 function renderDevices(){
   const shown=state.devices.filter(d=>d.present);
-  $('device-preview').innerHTML=shown.length?shown.slice(0,3).map(d=>`<div class="device-mini"><span class="device-icon" aria-hidden="true">◉</span><div><strong>${esc(d.name)}</strong><small>${esc(d.hardware)}</small></div>${d.enabled?'<span class="badge green">监听已启用</span>':'<span class="badge">未启用</span>'}</div>`).join(''):'<div class="empty">还没有连接音箱</div>';
-  $('device-list').innerHTML=shown.length?shown.map(d=>`<div class="device-row"><label><input type="checkbox" data-device="${esc(d.id)}" ${state.selected.has(d.id)?'checked':''} ${!d.supported?'disabled':''}><span class="device-description"><strong>${esc(d.name)}</strong><small>${esc(d.hardware)}${d.reason?' · '+esc(d.reason):''}</small></span></label><span class="badge${d.enabled?' green':''}">${!d.supported?'不可启用':d.enabled?'监听已启用':'未启用'}</span>${d.enabled?`<button data-pause="${esc(d.id)}">暂停</button>`:''}</div>`).join(''):'<div class="empty">绑定小米账号，获取可用音箱。</div>';
+  $('device-preview').innerHTML=shown.length?shown.slice(0,3).map(d=>`<div class="device-mini"><span class="device-icon" aria-hidden="true">◉</span><div><strong>${esc(d.name)}</strong><small>${esc(d.hardware)}</small></div>${!d.supported?'<span class="badge">不开放接入</span>':d.enabled?'<span class="badge green">监听已启用</span>':'<span class="badge">未启用</span>'}</div>`).join(''):'<div class="empty">还没有连接音箱</div>';
+  $('device-list').innerHTML=shown.length?shown.map(d=>`<div class="device-row"><label><input type="checkbox" data-device="${esc(d.id)}" ${state.selected.has(d.id)?'checked':''} ${!d.supported?'disabled':''}><span class="device-description"><strong>${esc(d.name)}</strong><small>${esc(d.hardware)}${d.reason?' · '+esc(d.reason):''}</small></span></label><span class="badge${d.enabled?' green':''}">${!d.supported?'不开放接入':d.enabled?'监听已启用':'未启用'}</span>${d.enabled?`<button data-pause="${esc(d.id)}">暂停</button>`:''}</div>`).join(''):'<div class="empty">绑定小米账号，获取可用音箱。</div>';
   $('device-list').querySelectorAll('[data-device]').forEach(el=>el.addEventListener('change',()=>{if(el.checked)state.selected.add(el.dataset.device);else state.selected.delete(el.dataset.device);updateDeviceSaveState();}));
   $('device-list').querySelectorAll('[data-pause]').forEach(el=>el.addEventListener('click',()=>busy(el,async()=>{await api('/devices','PUT',{devices:state.devices.filter(d=>d.enabled&&d.id!==el.dataset.pause).map(d=>d.id)});state.selected.delete(el.dataset.pause);await fetchDevices();toast('已暂停接收新问题，当前回答允许完成');}).catch(e=>toast(e.message))));
   updateDeviceSaveState();
@@ -196,7 +196,7 @@ async function navigate(view){
     $('xiaomi-secret-input').value='';$('xiaomi-secret-input').readOnly=true;
   }
   state.view=view;displayView(view);document.querySelectorAll('[data-view]').forEach(el=>el.classList.toggle('active',el.dataset.view===view));$('page-title').textContent=labels[view][0];$('page-kicker').textContent=labels[view][1];
-  if(view==='devices'){resetBindingForm();updateConnection();await fetchDevices();}if(view==='history')await loadHistory(true);if(view==='admin')await loadAdmin();if(view==='dialogue')renderDialogue();if(view==='account')await loadSecurity();if(view==='billing')await loadBilling();
+  if(view==='devices'){resetBindingForm();updateConnection();await fetchDevices();}if(view==='history')await loadHistory(true);if(view==='admin')await loadAdmin();if(view==='dialogue')renderDialogue();if(view==='account')await loadSecurity();if(view==='billing')await loadBilling();if(view==='help'&&typeof loadSupportHelp==='function')await loadSupportHelp();
 }
 function historyEntry(r){
   const article=document.createElement('article');article.className='history-entry';article.dataset.historyId=r.id;
@@ -266,7 +266,7 @@ async function loadAdmin(){
 function setAdminTab(key){
   state.adminTab=key;
   document.querySelectorAll('[data-admin-tab]').forEach(tab=>{const selected=tab.dataset.adminTab===key;tab.setAttribute('aria-selected',String(selected));tab.tabIndex=selected?0:-1;$(tab.getAttribute('aria-controls')).hidden=!selected;});
-  refreshRankingIfDue();if(key==='billing')loadAdminBilling().catch(e=>toast(e.message));
+  refreshRankingIfDue();if(key==='feedback'&&typeof loadAdminFeedback==='function')loadAdminFeedback().catch(e=>toast(e.message));if(key==='billing')loadAdminBilling().catch(e=>toast(e.message));
 }
 function beijingDay(){return new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit'}).format(new Date());}
 function resetRanking(){

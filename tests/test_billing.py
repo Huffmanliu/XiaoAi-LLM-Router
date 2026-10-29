@@ -326,3 +326,58 @@ def test_payments_and_qr_metadata_do_not_contain_plain_credentials(paid):
     info = client.get('/api/billing').json()
     assert 'password' not in str(info) and 'secret' not in str(info)
     assert app.state.billing.order(order['id'])['user_id'] == owner['user_id']
+
+
+def test_webpay_entry_is_owned_and_has_restricted_form_action(paid):
+    client, app, _, _, plan = paid
+    adapter = app.state.billing.gateways.get('alipay')
+    adapter.page_payment = True
+    adapter.create.return_value = ''
+    adapter.payment_form = lambda order: '<form method="post" action="https://openapi.alipay.com/gateway.do"></form>'
+    order = checkout(client, plan).json()
+    assert order['page_payment_available'] and not order['qr_available']
+    assert client.get('/api/billing/orders/' + order['id'] + '/qr').status_code == 409
+    form = client.get('/api/billing/orders/' + order['id'] + '/pay')
+    assert form.status_code == 200 and 'form-action' in form.headers['Content-Security-Policy']
+    assert form.headers['Content-Security-Policy'].endswith("form-action 'self' https://openapi.alipay.com")
+    login(client)
+    invite_user(client, 'second-payer')
+    assert client.get('/api/billing/orders/' + order['id'] + '/pay').status_code == 404
+
+
+def test_webpay_persistent_notice_conflict_and_refund_event_never_grants(paid):
+    client, app, _, _, plan = paid
+    adapter = app.state.billing.gateways.get('alipay')
+    adapter.page_payment = True
+    order = checkout(client, plan).json()
+    notice = result(order, notify_id='synthetic-notice', event_type='TRADE_SUCCESS:paid')
+    app.state.billing.settle('alipay', adapter.profile, notice)
+    app.state.billing.settle('alipay', adapter.profile, notice)
+    with app.state.store.db() as db:
+        assert db.execute('SELECT COUNT(*) FROM billing_notify_events').fetchone()[0] == 1
+        assert db.execute('SELECT COUNT(*) FROM billing_grants').fetchone()[0] == 1
+    other = checkout(client, plan).json()
+    with pytest.raises(PaymentError):
+        app.state.billing.settle('alipay', adapter.profile, {**notice, 'id': other['id']})
+    app.state.billing.settle('alipay', adapter.profile, result(other, state='refund_review'))
+    assert app.state.billing.order(other['id'])['state'] == 'pending'
+    app.state.billing.settle('alipay', adapter.profile, result(order, state='closed'))
+    assert app.state.billing.order(order['id'])['state'] == 'refund_review'
+    assert client.get('/api/billing').json()['current'] is None
+
+
+def test_payment_return_shell_public_but_no_unverified_order_lookup(paid):
+    client, app, _, _, _ = paid
+    adapter = app.state.billing.gateways.get('alipay')
+    adapter.page_payment = True
+
+    def reject(params):
+        raise PaymentError('Synthetic signature rejection')
+
+    adapter.verify_params = reject
+    assert client.get('/payments/alipay/return').status_code == 200
+    response = client.get('/api/billing/alipay-return?out_trade_no=untrusted&trade_status=TRADE_SUCCESS')
+    assert response.status_code == 400 and '签名' in response.json()['error']
+    client.cookies.clear()
+    assert client.get('/payments/alipay/return').status_code == 200
+    assert client.get('/api/billing/alipay-return?out_trade_no=untrusted').status_code == 401

@@ -338,6 +338,9 @@ class Gateways:
                     self.errors[name] = '尚未配置商户收款信息'
                     continue
                 try:
+                    if name == 'alipay' and cfg[name].get('product') == 'webpay':
+                        from .alipay_webpay import WebAlipay
+                        adapter = WebAlipay
                     self.adapters[name] = adapter(cfg[name], origin)
                 except Exception:
                     self.errors[name] = '商户参数、密钥或公钥配置未通过检查'

@@ -9,7 +9,8 @@ import sqlite3
 import time
 
 from fastapi import Depends, Request
-from fastapi.responses import PlainTextResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
+from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 import segno
 
@@ -40,6 +41,10 @@ CREATE TABLE IF NOT EXISTS billing_refunds (
  created REAL NOT NULL, state TEXT NOT NULL, reason TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS billing_audit (
  id INTEGER PRIMARY KEY, order_id TEXT, actor_id TEXT, action TEXT NOT NULL, created REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS billing_notify_events (
+ provider TEXT NOT NULL, profile TEXT NOT NULL, notify_id TEXT NOT NULL, order_id TEXT NOT NULL,
+ transaction_id TEXT NOT NULL, event_type TEXT NOT NULL, created REAL NOT NULL,
+ PRIMARY KEY(provider,profile,notify_id));
 '''
 
 
@@ -138,6 +143,13 @@ class Billing:
                 'state', 'created', 'expires', 'paid_at', 'checked_at', 'note', 'terms')
         result = {key: order[key] for key in keys}
         result['qr_available'] = bool(order['qr'] and order['state'] == 'pending' and order['expires'] > time.time())
+        try:
+            page_payment = bool(getattr(self.adapter(order), 'page_payment', False))
+        except Rejected:
+            page_payment = False
+        result['page_payment_available'] = bool(page_payment and order['state'] == 'pending' and order['expires'] > time.time())
+        if page_payment:
+            result['qr_available'] = False
         result['payment_expired'] = order['expires'] <= time.time() and order['state'] in ('creating', 'pending', 'uncertain')
         if db is not None:
             grant = db.execute('SELECT starts,expires,state FROM billing_grants WHERE order_id=?', (order['id'],)).fetchone()
@@ -221,6 +233,17 @@ class Billing:
             tx = result.get('transaction_id')
             if row['transaction_id'] and tx and row['transaction_id'] != tx:
                 raise PaymentError('支付交易号不匹配')
+            if result.get('notify_id'):
+                # Insert in the same transaction as fulfillment. A failed settlement rolls back both.
+                if not db.execute('INSERT OR IGNORE INTO billing_notify_events VALUES(?,?,?,?,?,?,?)',
+                                  (provider, profile, result['notify_id'], row['id'], tx or '',
+                                   result['event_type'], now)).rowcount:
+                    prior = db.execute('SELECT order_id,transaction_id,event_type FROM billing_notify_events '
+                                       'WHERE provider=? AND profile=? AND notify_id=?',
+                                       (provider, profile, result['notify_id'])).fetchone()
+                    if tuple(prior) != (row['id'], tx or '', result['event_type']):
+                        raise PaymentError('支付通知标识冲突')
+                    return
             if status == 'paid':
                 if not isinstance(tx, str) or not 1 <= len(tx) <= 80:
                     raise PaymentError('缺少有效支付交易号')
@@ -236,14 +259,21 @@ class Billing:
                            (row['id'], row['user_id'], row['plan_id'], row['plan_name'], start, start + row['days'] * 86400, row['daily_limit']))
                 self.audit(db, 'payment_confirmed', row['id'])
             elif status == 'closed':
-                if row['state'] in ('paid', 'refunding', 'refund_review') and provider == 'alipay':
+                if row['state'] in ('paid', 'refunding', 'refund_review') and provider == 'alipay' and not getattr(self.adapter(dict(row)), 'page_payment', False):
                     self._refund_done(db, row['id'])
+                elif row['state'] == 'paid' and provider == 'alipay':
+                    db.execute("UPDATE billing_orders SET state='refund_review',note=? WHERE id=?", ('商户侧交易已关闭，请管理员核对退款金额', row['id']))
+                    db.execute("UPDATE billing_grants SET state='suspended' WHERE order_id=?", (row['id'],))
+                    self.audit(db, 'external_refund_review', row['id'])
                 elif row['state'] not in ('paid', 'refunding', 'refunded', 'refund_review'):
                     db.execute("UPDATE billing_orders SET state='closed',qr=NULL WHERE id=?", (row['id'],))
             elif status == 'refund_review' and row['state'] == 'paid':
                 db.execute("UPDATE billing_orders SET state='refund_review',note=? WHERE id=?", ('商户侧存在退款，请管理员核对退款金额', row['id']))
                 db.execute("UPDATE billing_grants SET state='suspended' WHERE order_id=?", (row['id'],))
                 self.audit(db, 'external_refund_review', row['id'])
+            elif status == 'unknown' and row['state'] in ('creating', 'pending', 'uncertain'):
+                db.execute("UPDATE billing_orders SET state='uncertain',note=? WHERE id=?",
+                           ('支付结果未知，请核对原订单，勿重复付款', row['id']))
 
     def _refund_done(self, db, oid):
         db.execute("UPDATE billing_orders SET state='refunded',qr=NULL,note='' WHERE id=?", (oid,))
@@ -314,6 +344,45 @@ class Billing:
                     await self.reconcile(row['id'])
 
     def install(self, app, current, admin, auth, rate):
+        @app.get('/payments/alipay/return')
+        async def alipay_return():
+            # The public shell displays no order details. Authenticated API verifies signed params.
+            return FileResponse(Path(__file__).parent / 'static' / 'alipay-return.html')
+
+        @app.get('/api/billing/alipay-return')
+        async def alipay_return_status(request: Request, user=Depends(current)):
+            pairs = list(request.query_params.multi_items())
+            params = dict(pairs)
+            adapter = self.gateways.get('alipay')
+            if len(params) != len(pairs) or not getattr(adapter, 'page_payment', False):
+                raise Rejected('支付回跳参数无效', 400)
+            try:
+                adapter.verify_params(params)
+            except PaymentError:
+                raise Rejected('支付回跳签名校验失败，请从订单列表核对', 400) from None
+            return await self.reconcile(params.get('out_trade_no', ''), user['user_id'])
+
+        @app.get('/api/billing/orders/{oid}/pay')
+        async def page_pay(oid: str, user=Depends(current)):
+            order = self.order(oid, user['user_id'])
+            if not self.public_order(order)['page_payment_available']:
+                raise Rejected('该订单暂不能前往付款，请先核对原订单', 409)
+            return HTMLResponse(self.adapter(order).payment_form(order))
+
+        @app.post('/api/billing/orders/{oid}/close')
+        async def close_order(oid: str, request: Request, user=Depends(current)):
+            rate(request, 'payment-close', 5)
+            order = self.order(oid, user['user_id'])
+            adapter = self.adapter(order)
+            if not getattr(adapter, 'page_payment', False) or order['state'] not in ('pending', 'uncertain', 'creating'):
+                raise Rejected('该订单暂不能关闭，请先查询订单结果', 409)
+            try:
+                async with self.network:
+                    self.settle(order['provider'], adapter.profile, await adapter.close(order))
+            except PaymentError:
+                raise Rejected('关单结果待核对，请查询原订单', 409) from None
+            return self.public_order(self.order(oid, user['user_id']))
+
         @app.get('/api/billing')
         async def overview(user=Depends(current)):
             return self.overview(user['user_id'])
@@ -348,7 +417,7 @@ class Billing:
                 result = adapter.notification(dict(request.headers), body)
                 self.settle(provider, adapter.profile, result)
             except Exception:
-                return PlainTextResponse('failure', status_code=400)
+                return PlainTextResponse('fail' if provider == 'alipay' else 'failure', status_code=400)
             return PlainTextResponse('success') if provider == 'alipay' else Response(status_code=204)
 
         @app.get('/api/admin/billing')

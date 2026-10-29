@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="light"><title>帮助与反馈 · 音箱 AI 接入</title>
+<link rel="stylesheet" href="/static/style.css"><script src="/static/support.js" defer></script>
+</head>
+<body data-support-page="true">
+<main class="help-shell">
+  <header class="help-header"><div><a class="brand" href="/">音箱<span>AI 接入</span></a><p class="service-identity">第三方接入服务 · 非小米官方产品</p></div><a class="button" href="/" id="help-home">返回平台</a></header>
+  <div class="help-intro"><span class="eyebrow">使用指引与问题处理</span><h1>帮助与反馈</h1><p class="muted">先找找常见问题的答案，也可以把使用中遇到的问题和建议告诉我们。</p></div>
+  <div data-help-content>
+  <nav class="admin-tabs" role="tablist" aria-label="帮助分类"><button id="help-tab-faq" type="button" role="tab" aria-controls="help-panel-faq" aria-selected="true" tabindex="0" data-help-tab="faq">常见问题</button><button id="help-tab-feedback" type="button" role="tab" aria-controls="help-panel-feedback" aria-selected="false" tabindex="-1" data-help-tab="feedback">意见反馈</button></nav>
+  <section id="help-panel-faq" role="tabpanel" aria-labelledby="help-tab-faq">
+    <article class="card faq-card"><h2>开始使用</h2>
+      <details id="faq-official"><summary>这是小米官方服务吗？</summary><p>不是。本平台是独立的第三方 AI 接入服务，非小米官方产品。平台账号、服务支持及后续可能提供的套餐均由本平台管理，不代表小米官方服务或会员权益。</p></details>
+      <details id="faq-models"><summary>哪些音箱可以接入？</summary><p>本平台仅为未原生支持 AI 大模型、且已验证兼容的小爱音箱提供接入。绑定小米账号后，“我的设备”会显示可选设备和禁用原因。并非所有旧型号都兼容，请以设备列表显示的支持状态为准。</p></details>
+      <details id="faq-disabled"><summary>为什么设备能显示，却不能勾选？</summary><p>原生支持 AI 大模型的机型不开放接入，尚未验证兼容或明确不支持的机型也无法启用。设备归属冲突、分配给其他运行环境等情况同样会限制启用，具体原因显示在设备旁。同一账号下符合条件的其他音箱仍可正常选择。</p></details>
+      <details id="faq-accounts"><summary>平台账号和小米账号有什么区别？</summary><p>平台账号用于登录本网站，管理设备、用量和记录；小米账号用于绑定音箱，两者独立。先用平台用户名和平台密码登录，再在“我的设备”填写音箱所属的小米账号信息。小米密码不会修改平台密码。</p></details>
+      <details id="faq-code"><summary>绑定时的验证码去哪里找？</summary><p>平台登录、注册或身份验证使用平台的安全邮箱。绑定小米账号时，小米可能要求向该小米账号绑定的安全手机或安全邮箱发送验证码；它可能不是你当前使用的手机号，也不一定是平台安全邮箱。请按当前页面的收件提示查找，不要混用两类验证码。无法收到时，可通过绑定页的小米官方找回指引检查账号信息。</p></details>
+      <details id="faq-start"><summary>绑定完成后，怎样开始使用？</summary><p>在“我的设备”主动勾选支持的音箱，点击“确认并更新监听”后才开始接收新问题。新增设备不会自动勾选。按平常方式唤醒“小爱同学”并提问；是否由本平台调用 AI，取决于“对话设置”中的调用方式。</p></details>
+    </article>
+    <article class="card faq-card"><h2>回答与运行</h2>
+      <details id="faq-routing"><summary>“失败接管”和“固定触发词”有什么区别？</summary><p>默认“失败接管”：小爱的原始回答命中平台已启用的明确失败话术时，由 AI 补答，可能先听到小爱的失败提示；没有识别到的失败话术不会自动接管。“固定触发词”：只有提问包含已设置的触发词时才调用 AI，小爱答不上来也不会额外接管。两种模式互斥，不改变音箱的“小爱同学”唤醒词。</p></details>
+      <details id="faq-browser"><summary>关闭网页后，音箱还能使用吗？</summary><p>可以关闭浏览器页面，设备监听和处理由平台后台服务运行。前提是后台服务仍在运行、账号与绑定有效、设备已启用且额度可用。本机运行时，承载服务的电脑和启动终端需要保持运行；电脑休眠或服务退出会影响接管。网页能打开也不代表音箱播报链路一定正常。</p></details>
+      <details id="faq-no-answer"><summary>为什么没有 AI 回答，或有记录却没声音？</summary><p>先查看“我的设备”的绑定状态、禁用原因与启用选择，再确认“对话设置”的调用方式和剩余额度。没有请求记录，可能是问题未满足接管条件；已有记录时，请分别查看“模型状态”和“播报”结果。模型返回成功不代表音箱已经播放，播报失败行会尽可能给出具体原因。不要仅凭“没声音”反复重绑或重试；仍无法定位时，可在反馈中填写发生时间、关联设备和页面状态，不必提供聊天正文。</p></details>
+      <details id="faq-memory"><summary>AI 会记住之前的对话吗？</summary><p id="faq-memory-settings" role="status" aria-live="polite">正在读取当前记忆与历史设置…</p><button id="faq-memory-refresh" type="button">更新设置</button><p>平台按用户和设备隔离短期上下文，一问一答算一轮。上下文闲置达到设置时长后过期；超过轮数时，只保留最近的问答作为上下文。可在“对话设置”查看记忆规则并清空上下文。</p><p>对话历史与模型记忆独立：删除历史不会自动清空上下文，历史也不会自动恢复为模型记忆。</p></details>
+      <details id="faq-pause"><summary>怎样暂停服务或解绑？</summary><p>可在设备列表暂停音箱，或取消选择后确认保存，以停止接收新的 AI 问题；已经开始的回答允许完成。解绑小米账号会等待当前任务结束，再移除绑定凭据。解绑不会删除平台账号和已有历史，历史可在“对话历史”中自行删除。</p></details>
+    </article>
+    <article class="card faq-card"><h2>隐私与反馈</h2>
+      <details id="faq-privacy"><summary>我的对话和账号信息如何保护？</summary><p>平台密码采用带随机盐的哈希保存；小米绑定凭据和问答正文加密保存。管理员无法通过后台读取用户聊天正文或完整凭据。</p><p>你主动提交的反馈内容和关联设备会供管理员查看，用于处理问题；反馈不会自动附带聊天正文、密码、验证码或日志。请勿在反馈中填写这些敏感信息。</p></details>
+    </article>
+    <div class="card soft"><h2>还没找到答案？</h2><p class="muted">可以在“意见反馈”中提交问题或建议，并查看处理状态和管理员回复。</p><button type="button" data-help-open-feedback>前往意见反馈</button></div>
+  </section>
+  <section id="help-panel-feedback" role="tabpanel" aria-labelledby="help-tab-feedback" hidden>
+    <div id="feedback-login-note" class="card"><h2>登录后提交反馈</h2><p class="muted" id="feedback-auth-message">正在检查平台登录状态…</p><a class="button" href="/">前往平台登录</a><button type="button" id="feedback-check-login">我已登录，重新检查</button></div>
+    <div id="feedback-member" hidden>
+      <article class="card"><div class="card-heading"><div><h2>提交意见或使用问题</h2><p class="muted small" id="feedback-account"></p></div></div>
+        <p class="section-note" id="feedback-privacy">反馈内容和你主动选择的设备会供管理员查看，不会自动附带聊天正文、账号密码、验证码或日志。请勿填写这些敏感信息。</p>
+        <form id="feedback-form" aria-describedby="feedback-privacy">
+          <div class="form-grid"><label>反馈类型<select name="category" required><option value="problem">使用问题</option><option value="suggestion">功能建议</option><option value="device">机型支持申请</option><option value="other">其他</option></select></label><label>关联设备（可选）<select name="device_id" id="feedback-device"><option value="">不关联设备</option></select></label></div>
+          <label>反馈内容<textarea name="content" rows="6" maxlength="2000" required placeholder="请描述发生了什么、发生时间，以及你希望怎样改进。机型支持申请可填写型号，无需提供小米账号。"></textarea></label>
+          <p class="small muted">最多2000个字符，每小时最多提交5条。回复请在下方“我的反馈”查看。</p><button class="primary" type="submit">提交反馈</button>
+        </form><p id="feedback-submit-result" role="status" aria-live="polite"></p>
+      </article>
+      <article class="card"><div class="card-heading"><h2>我的反馈</h2><button type="button" id="feedback-refresh">刷新记录</button></div><p id="feedback-list-message" role="status" aria-live="polite"></p><div id="feedback-list"></div><div class="support-pagination"><button id="feedback-prev" type="button" disabled>上一页</button><span id="feedback-page"></span><button id="feedback-next" type="button" disabled>下一页</button></div></article>
+    </div>
+  </section>
+  </div>
+  <footer class="footer">音箱 AI 接入 · 第三方服务，非小米官方产品 <a href="/">返回平台</a></footer>
+</main>
+</body></html>

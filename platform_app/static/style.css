@@ -22,3 +22,32 @@
 .speech-diagnostic{min-width:150px;max-width:300px;white-space:normal;overflow-wrap:anywhere;margin:6px 0 0}
 
 .connected-icon.warning{background:#fff1df;color:#a46513}
+
+/* Service identity stays visible on both desktop and mobile. */
+.service-identity{font-size:13px;font-weight:600;line-height:1.7;color:#34594c;letter-spacing:.3px}
+.story-copy .service-identity{color:#34594c;font-size:13px;max-width:none}
+.sidebar-identity{display:flex;flex-direction:column;font-size:12px;margin:12px 0 0}
+.welcome-card>div:first-child{flex:1;min-width:0;max-width:620px}
+.welcome-card .service-identity{font-size:13px;color:#34594c;margin:0 0 12px}
+.welcome-card .speaker-art{flex-shrink:0}
+.device-eligibility{background:#f2f7f4}
+.device-eligibility p{font-size:14px;line-height:1.8;margin:12px 0 0;color:#496358}
+@media(max-width:720px){.sidebar-identity{margin:8px 0 0;flex-direction:row;flex-wrap:wrap;gap:0 12px}.welcome-card .service-identity,.story-copy .service-identity{font-size:12px}.story-copy{margin-top:20px}.device-eligibility p{font-size:13px}}
+
+/* Help pages and voluntary support feedback share the existing visual system. */
+a.button{display:inline-block;text-decoration:none;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:10px 16px;font-size:13px;background:white}
+.auth-note a,.help-shell a:not(.brand):not(.button){color:var(--accent);text-underline-offset:3px}
+.help-shell{max-width:1000px;margin:auto;padding:32px 24px;min-height:100vh}
+.help-header{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:42px}
+.help-header .service-identity{margin:8px 0 0;font-size:12px}
+.help-intro h1{font-size:32px;margin:12px 0}.help-intro{margin-bottom:28px}
+.faq-card details{border-top:1px solid var(--line);padding:18px 0}.faq-card details:last-child{padding-bottom:0}
+.faq-card summary{cursor:pointer;font-size:15px;font-weight:600;line-height:1.7}.faq-card details p{font-size:14px;line-height:1.9;color:#496358;margin:14px 0 0}
+.help-shell :focus-visible,.support-workspace :focus-visible,.feedback-handle :focus-visible{outline:3px solid #78b9a9;outline-offset:3px}
+.support-pagination{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:18px;font-size:12px}
+.feedback-ticket{border-top:1px solid var(--line);padding:22px 0}.feedback-meta{display:flex;align-items:center;flex-wrap:wrap;gap:10px;color:#526f68;font-size:12px}
+.feedback-content{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.8}
+.feedback-reply{background:#edf5f1;border-radius:8px;padding:15px;margin:14px 0}.feedback-reply strong{font-size:13px}
+.feedback-reply p{margin:8px 0 0}.feedback-handle{margin-top:18px;max-width:700px}.support-filter{max-width:230px}
+#feedback-submit-result,#feedback-list-message,#admin-feedback-message{font-size:13px;color:#496358;overflow-wrap:anywhere}
+@media(max-width:720px){.help-shell{padding:22px 18px}.help-header{margin-bottom:30px;align-items:flex-start}.help-header .brand{font-size:22px}.help-header .service-identity{font-size:11px}.help-header .button{white-space:nowrap;padding:8px 12px}.help-intro h1{font-size:27px}.support-pagination{flex-wrap:wrap}.faq-card summary{font-size:14px}.faq-card details p,.feedback-content{font-size:13px}}

@@ -24,6 +24,7 @@ import yaml
 
 from .auth import Auth
 from .billing import Billing
+from .feedback import Feedback
 from .routing import failure_match, normalized
 from .runtime import Runtime
 from .security import Vault, digest, masked_account
@@ -307,6 +308,8 @@ def create_app(root=None, cfg=None, excluded=(), runtime_factory=Runtime, mailer
         response.headers['X-Frame-Options'] = 'DENY'
         response.headers['Referrer-Policy'] = 'no-referrer'
         response.headers['Content-Security-Policy'] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        if request.url.path.startswith('/api/billing/orders/') and request.url.path.endswith('/pay') and response.status_code == 200:
+            response.headers['Content-Security-Policy'] += ' https://openapi.alipay.com'
         return response
 
     def rate(request, action, maximum=10):
@@ -347,6 +350,12 @@ def create_app(root=None, cfg=None, excluded=(), runtime_factory=Runtime, mailer
 
     auth.install(app, current, rate)
     billing.install(app, current, admin, auth, rate)
+    Feedback(store).install(app, current, admin)
+
+    @app.get('/api/help/settings')
+    def help_settings():
+        defaults = store.defaults()
+        return {key: defaults[key] for key in ('ttl_seconds', 'max_turns', 'retention_days')}
 
     @app.get('/api/me')
     async def me(user=Depends(current)):
@@ -618,5 +627,9 @@ def create_app(root=None, cfg=None, excluded=(), runtime_factory=Runtime, mailer
     @app.get('/')
     async def index():
         return FileResponse(static / 'index.html')
+
+    @app.get('/help')
+    async def help_page():
+        return FileResponse(static / 'help.html')
 
     return app

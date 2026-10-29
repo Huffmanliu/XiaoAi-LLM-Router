@@ -64,6 +64,8 @@ def backup(store, directory):
         dst.execute('DELETE FROM invites')
         for table in ('session_security', 'auth_challenges', 'auth_limits', 'mail_outbox', 'trusted_browsers'):
             dst.execute('DELETE FROM ' + table)
+        if dst.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='feedback'").fetchone():
+            dst.execute('DELETE FROM feedback')
         dst.commit()
     return path
 

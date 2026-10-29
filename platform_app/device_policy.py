@@ -11,7 +11,7 @@ NATIVE_AI_MODELS = {
     'OH2': 'Xiaomi 智能音箱', 'OH2P': 'Xiaomi 智能音箱 Pro',
     'L17A': 'Xiaomi Sound Pro', 'X10A': 'Xiaomi 智能家庭屏 10',
 }
-NATIVE_AI_REASON = '该机型自带超级小爱 AI 大模型，无需平台接管，暂不支持启用'
+NATIVE_AI_REASON = '该机型原生支持 AI 大模型，本平台不开放接入'
 
 
 def hardware_code(value):

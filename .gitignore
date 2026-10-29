@@ -20,3 +20,4 @@ config.yaml
 
 # 工具产物
 graphflow-out/
+/.alipay-sandbox.json

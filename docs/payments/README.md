@@ -54,3 +54,42 @@
 `platform_app/payment_gateways.py`负责通道协议；`billing.py`负责订单、权益、回调和后台；`Store.reserve/started`在发模型请求前校验权益；前台在`static/billing.js`。生产没有模拟支付开关、跳过验签选项或“手动标已支付”接口；测试仅从工厂注入模拟通道。
 
 官方参考（2026-10-22至23核对）：[支付宝预创建](https://developer.alibaba.com/docs/api.htm?apiId=862&docType=4)、[支付宝官方SDK的响应验签处理](https://github.com/alipay/alipay-sdk-python-all/blob/master/alipay/aop/api/DefaultAlipayClient.py)、[支付宝退款查询](https://developer.alibaba.com/docs/api.htm?apiId=1049&docType=4)、[微信Native下单](https://pay.wechatpay.cn/doc/v3/merchant/4012791877)、[微信查单](https://pay.wechatpay.cn/doc/v3/merchant/4012791880)、[微信开发指引](https://pay.wechatpay.cn/doc/v3/merchant/4012791891)、[微信公钥验签](https://pay.wechatpay.cn/doc/v3/merchant/4013053249)。
+
+## AI 网页应用收款（2026-10-27，本机新增）
+
+新增可选官方 Python SDK 适配器 `WebAlipay`，产品为 `alipay.trade.page.pay`，固定
+`FAST_INSTANT_TRADE_PAY`，使用 `page_execute` 生成 POST 表单。浏览器打开实际表单页并提交，
+不把 HTML 当作跳转 URL。已有支付宝当面付及微信 Native 配置仍有效；不会自动切换产品或开启收费。
+
+正式商户选择此产品时，在原私有支付配置的 `alipay` 部分指定
+`"product": "webpay"`、`"sdk_config_file": "/etc/xiaoai-platform/payments/webpay.json"`。
+该独立私有 JSON 须为0600，使用当前同一生产应用的 `appId`、`sellerId`、`appPublicKey`、
+`appPrivatePkcsKey`（Python所需PKCS#1原始字符串）和 `alipayPublicKey`。
+密钥不带PEM包装，不自行转换或复制沙箱值到生产。加载失败时通道保持不可用。
+生产网关固定官方HTTPS，来源仍须通过现有公网域名检查；密钥不经网页填写。
+
+原订单与套餐快照、登录归属、退款审批和权益幂等保持原规则。网页收款新增本人订单的
+`GET /api/billing/orders/{id}/pay`、`POST /api/billing/orders/{id}/close`，关单前先查付款状态。
+结果页为 `GET /payments/alipay/return`，空参数显示中性说明；带参数时由独立已登录接口校验
+完整同步签名并核对本人订单，再向支付宝查询，不能从浏览器参数直接开通。
+返回页和付款表单均沿用严格脚本策略，只有付款表单页允许提交到固定官方网关。
+
+异步通知使用官方SDK验签，核对运行配置中的应用/商户、订单及金额；退款事件不当作付款。
+通知标识和事件与权益在同一SQLite事务持久去重；重复或冲突事件不能重复发权益。
+支付宝查单的官方返回字段不保证有`seller_id`，查询归属依据为绑定应用的SDK请求、
+固定官方TLS、响应签名及精确订单号/金额；若响应提供应用/商户字段则额外核对。
+未知状态保留待核对；已付订单查询为关闭时挂起人工核对退款，不推断全额到账。
+全额退款复用原退款请求号，`fund_change=N`或缺失时保留处理中，退款查询只有明确
+`REFUND_SUCCESS`且订单/交易/退款号/金额全匹配才确认成功。
+
+本机单独体验入口：在项目根运行 `.venv/bin/python -m platform_app.alipay_sandbox`，
+访问 `http://127.0.0.1:8766/`。只读项目根已校验的`.alipay-sandbox.json`，
+从`appIds[0]`选择对应原始字段；固定沙箱网关，无生产回退，也无跳过验签开关。
+独立订单保存在被忽略的`deploy/alipay-webpay-sandbox/`，不访问平台账号/聊天，
+不监听音箱、不调用模型、不发送邮件、不发放真实套餐权益。
+体验金额0.01元属于沙箱资金。浏览器可创建/继续原订单、前往沙箱收银台、查单、关单及全额退沙箱资金；
+订单所有权使用HttpOnly浏览器凭据，写入校验固定来源，数据库重启保留，单实例加锁。
+本机不传公网`notify_url`，通知处理代码保留，支付结果通过签名主动查询确认。
+沙箱买家登录或安卓沙箱支付宝扫码两种方式任选；尚未实际付款不能称为沙箱支付已验证。
+
+查单字段依据：[支付宝官方交易查询契约](https://aipay.alipay.com/docs/vibe-pay/ai-web-app-payment-qianyi/api-list/alipay-trade-query.md)（2026-10-27核对）。
