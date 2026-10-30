@@ -25,6 +25,7 @@ const labels = {overview:['概览','一切尽在掌握'], devices:['我的设备
 const statusName = {completed:'模型已返回', failed:'请求失败', interrupted:'请求中断', reserved:'处理中', cancelled:'未发出',
   submitted:'指令已提交', submitting:'提交中', not_requested:'不播报', unknown:'历史未记录', ready:'已绑定', unbound:'未绑定小米账号',
   needs_verification:'需要重新绑定', rate_limited:'小米请求受限，访问已暂停', connection_error:'小米服务访问异常', idle:'待连接'};
+const bindingStageNames={read_auth:'小米账号读取授权',devices:'获取设备列表',speech_auth:'音箱播报授权',speech_check:'检查播报授权',apply:'保存绑定'};
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const number = (n) => n == null ? '未知' : Number(n).toLocaleString('zh-CN');
 const date = (n) => new Date(n*1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
@@ -167,7 +168,8 @@ function updateConnection(){
   const wait=Math.max(0,Number(state.login?.retry_after)||0);
   const retryAvailable=(!limited||unboundReady)&&(state.login?.mode!=='reverify'||canReverify);
   $('binding-result').hidden=!failed;
-  $('binding-result-message').textContent=failed?(state.login.message||'本次绑定未完成，原绑定保持不变。')+(!retryAvailable&&check?.state==='valid'?'原绑定现已恢复正常，无需再次重新绑定。':''):'';
+  const failureMessage=state.login?.diagnostic?.kind==='rate_limited'?`${bindingStageNames[state.login.stage]||'本次绑定'}遇到小米请求限制，本次绑定未完成。原账号与设备选择保留。${limited?'请以下方当前暂停状态和等待时间为准。':'当前已无请求暂停，请以当前账号状态为准。'}`:state.login?.message||'本次绑定未完成，原绑定保持不变。';
+  $('binding-result-message').textContent=failed?failureMessage+(!retryAvailable&&check?.state==='valid'?'原绑定现已恢复正常，无需再次重新绑定。':''):'';
   $('retry-binding').hidden=!failed||showForm||!retryAvailable;
   $('retry-binding').disabled=wait>0;
   $('retry-binding').textContent=wait>0?`还需等待${wait}秒后重新尝试`:'我已了解结果，重新尝试';
@@ -572,7 +574,7 @@ async function tick(){if(!state.me||document.hidden||state.refreshing)return;sta
   state.me=await api('/me');const job=await api('/xiaomi/login');state.login=job;updateConnection();
   if(state.view==='devices'){
     const recipient=job.recipient||(job.method==='短信'?'小米账号绑定的安全手机（可能不是你当前使用的手机号）':'小米账号绑定的安全邮箱');
-    const stageLabel={read_auth:'小米账号读取授权',devices:'获取设备列表',speech_auth:'音箱播报授权',speech_check:'检查播报授权',apply:'保存绑定'}[job.stage]||'小米账号绑定';
+    const stageLabel=bindingStageNames[job.stage]||'小米账号绑定';
     const otpMessage=`${stageLabel}需要小米${job.method||''}验证码，请查看${recipient}收到的${job.method||'验证码'}，并在下方填写。这不是平台登录的邮箱验证码。读取与播报授权可能分别要求验证。`;
     const messages={logging_in:`正在完成${stageLabel}…`,verification_required:otpMessage,verifying:`验证码已提交，正在继续完成${stageLabel}…`,completed:job.message,awaiting_confirmation:job.message,applying:'正在应用账号更新，等待当前回答结束…',expired:job.message,failed:job.message,cancelled:'本次绑定已取消'};
     $('login-state').textContent=messages[job.state]||'';$('otp-form').hidden=job.state!=='verification_required';
