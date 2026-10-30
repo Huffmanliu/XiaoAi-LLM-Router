@@ -233,7 +233,7 @@ def test_paused_accounts_are_skipped_and_probe_shutdown_is_clean(account_store, 
     (200, {'code': False}),
 ])
 def test_permission_limit_and_server_errors_do_not_force_password_entry(status, body):
-    assert Runtime._probe_result(status, body) == 'unknown'
+    assert Runtime._probe_result(status, body) == ('rate_limited' if status == 429 else 'unknown')
 
 
 def test_unexpected_probe_error_is_unknown_and_throttled(account_store, monkeypatch):

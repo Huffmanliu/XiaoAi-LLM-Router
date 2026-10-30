@@ -24,7 +24,7 @@ const labels = {overview:['概览','一切尽在掌握'], devices:['我的设备
   billing:['套餐与订单','服务与购买记录'], help:['帮助与反馈','使用指引与问题处理'], admin:['管理后台','关注运行，尊重隐私'], account:['账号与安全','安心使用，从这里开始']};
 const statusName = {completed:'模型已返回', failed:'请求失败', interrupted:'请求中断', reserved:'处理中', cancelled:'未发出',
   submitted:'指令已提交', submitting:'提交中', not_requested:'不播报', unknown:'历史未记录', ready:'已绑定', unbound:'未绑定小米账号',
-  needs_verification:'需要重新绑定', connection_error:'小米服务访问异常', idle:'待连接'};
+  needs_verification:'需要重新绑定', rate_limited:'小米请求受限，访问已暂停', connection_error:'小米服务访问异常', idle:'待连接'};
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const number = (n) => n == null ? '未知' : Number(n).toLocaleString('zh-CN');
 const date = (n) => new Date(n*1000).toLocaleString('zh-CN',{timeZone:'Asia/Shanghai',hour12:false});
@@ -135,17 +135,21 @@ function notifyBindingState(status){
   if(prior===undefined){try{prior=sessionStorage.getItem(key);}catch{prior=null;}}
   if(prior!==status){
     bindingNotices.set(uid,status);try{sessionStorage.setItem(key,status);}catch{}
-    if(status==='connection_error')toast('暂时无法访问小米服务，后台会自动重试；原绑定保留。');
+    if(status==='rate_limited')toast('小米请求受限，已暂停相关访问，原绑定与设备选择保留。');
+    else if(status==='connection_error')toast('暂时无法访问小米服务，后台会自动重试；原绑定保留。');
     else if(status==='needs_verification')toast('小米账号绑定已失效，请前往“我的设备”输入当前小米密码重新绑定。');
     else if(status==='ready'&&['connection_error','needs_verification'].includes(prior))toast('小米服务访问已恢复，当前账号已绑定。');
   }
 }
 function updateConnection(){
   const connected=state.me.account_state!=='unbound';
-  const s=state.me.account_state==='needs_verification'?'needs_verification':connected&&state.me.connection_state==='connection_error'?'connection_error':state.me.account_state;
+  const limited=state.me.connection_state==='rate_limited'||state.me.login_check?.state==='rate_limited';
+  const s=limited?'rate_limited':state.me.account_state==='needs_verification'?'needs_verification':connected&&state.me.connection_state==='connection_error'?'connection_error':state.me.account_state;
   const expired=s==='needs_verification';
   const check=state.me.login_check;
-  const canReverify=expired||Boolean(check?.can_reverify);
+  const canReverify=!limited&&(expired||Boolean(check?.can_reverify));
+  const unboundReady=limited&&!connected&&!check?.retry_after&&!check?.recovering;
+  if(limited&&!unboundReady&&state.bindingEditing)resetBindingForm();
   const slowRetry=s==='connection_error'&&check?.retry_interval===300;
   const loginActive=['logging_in','verification_required','verifying','applying'].includes(state.login?.state);
   const pending=state.login?.state==='awaiting_confirmation';
@@ -159,9 +163,9 @@ function updateConnection(){
     resetBindingForm();
   }
   const mode=loginActive?state.login.mode:state.bindingMode;
-  const showForm=(!connected||state.bindingEditing)&&(!failed||state.bindingEditing)&&!pending&&!loginActive;
+  const showForm=(!connected||state.bindingEditing)&&(!limited||unboundReady&&state.bindingEditing)&&(!failed||state.bindingEditing)&&!pending&&!loginActive;
   const wait=Math.max(0,Number(state.login?.retry_after)||0);
-  const retryAvailable=state.login?.mode!=='reverify'||canReverify;
+  const retryAvailable=(!limited||unboundReady)&&(state.login?.mode!=='reverify'||canReverify);
   $('binding-result').hidden=!failed;
   $('binding-result-message').textContent=failed?(state.login.message||'本次绑定未完成，原绑定保持不变。')+(!retryAvailable&&check?.state==='valid'?'原绑定现已恢复正常，无需再次重新绑定。':''):'';
   $('retry-binding').hidden=!failed||showForm||!retryAvailable;
@@ -170,17 +174,18 @@ function updateConnection(){
   const verified=s==='ready'&&check?.state==='valid'&&Date.now()/1000-check.checked_at<300;
   const statusText=verified?'已绑定':(statusName[s]||s);
   $('binding-title').textContent=expired?'需要重新绑定小米账号':connected?'已绑定的小米账号':'绑定小米账号';
-  $('connected-account-icon').textContent=expired?'!':'✓';
-  $('connected-account-icon').classList.toggle('warning',expired);
+  const warning=expired||s==='connection_error'||limited;
+  $('connected-account-icon').textContent=warning?'!':'✓';
+  $('connected-account-icon').classList.toggle('warning',warning);
   $('connected-account').hidden=!connected;
   $('connected-account-label').textContent=state.me.account_label||'已绑定的小米账号';
   $('connected-account-state').textContent=s==='connection_error'?'已绑定 · 小米服务访问异常':statusText;
-  $('connected-account-note').textContent=verified?'当前小米账号绑定正常，无需重新绑定。可以直接在下方管理音箱。':s==='ready'?'账号凭据已加密保存。系统会自动检查绑定状态，无需手动确认。':expired?'原账号及设备选择已保留，请重新绑定以恢复使用。平台登录不受影响。':slowRetry?'小米服务持续访问异常，已延长至约每5分钟检查一次，期间 AI 接管可能受影响。后台不会自动重新登录或发送验证码。你也可以主动重新绑定当前账号，原设备选择保留。':'暂时无法访问小米服务，后台约每分钟检查一次；持续异常约2分钟后会延长至约每5分钟。期间 AI 接管可能受影响。原绑定和设备选择保留，后台不会自动重新登录或发送验证码。';
+  $('connected-account-note').textContent=limited?'小米请求受限，相关访问已统一暂停。原绑定和设备选择保留，无需因此重新输入密码。':verified?'当前小米账号绑定正常，无需重新绑定。可以直接在下方管理音箱。':s==='ready'?'账号凭据已加密保存。系统会自动检查绑定状态，无需手动确认。':expired?'原账号及设备选择已保留，请重新绑定以恢复使用。平台登录不受影响。':slowRetry?'小米服务持续访问异常，已延长至约每5分钟检查一次，期间 AI 接管可能受影响。后台不会自动重新登录或发送验证码。你也可以主动重新绑定当前账号，原设备选择保留。':'暂时无法访问小米服务，后台约每分钟检查一次；持续异常约2分钟后会延长至约每5分钟。期间 AI 接管可能受影响。原绑定和设备选择保留，后台不会自动重新登录或发送验证码。';
   $('binding-access-state').hidden=s!=='connection_error'||pending;
   $('binding-access-state').textContent=slowRetry?'访问异常，约每5分钟重试':'访问异常，稍后重试';
   $('resume-reverify').hidden=failed||!canReverify||showForm||pending||loginActive;
   $('replace-account').hidden=showForm||pending;
-  $('replace-account').disabled=loginActive;
+  $('replace-account').disabled=loginActive||limited;
   $('binding-form').hidden=!showForm;
   mountScreen('binding-form',showForm&&state.view==='devices'&&Boolean(state.me));
   $('binding-hint').hidden=!showForm;
@@ -197,10 +202,15 @@ function updateConnection(){
   $('switch-confirmation').hidden=!pending;
   if(pending)$('switch-summary').textContent=`将从 ${state.login.old_label} 更换为 ${state.login.new_label}，发现 ${state.login.device_count} 台音箱。旧账号目前仍在使用。`;
   $('unbind').disabled=!connected||loginActive||pending;
-  $('refresh-devices').disabled=!connected||state.login?.state==='applying';
+  $('refresh-devices').disabled=!connected||limited||state.login?.state==='applying';
+  $('xiaomi-limit-panel').hidden=!limited;
+  $('xiaomi-limit-note').textContent=limited?(check.recovering?'正在进行一次恢复检查，请等待。':check.retry_after>0?`小米请求受限，相关访问已暂停。还需等待约${Math.ceil(check.retry_after/60)}分钟；冷却期间不会重复登录、发码或检查。`:(check.manual_required?'多次受限后已停止自动检查，请主动检查一次。':'冷却已结束，后台只会进行一次恢复检查。'))+'原绑定与设备选择保留。'+(!connected?'尚未保存绑定，等待结束后可主动开始绑定。':''):'';
+  $('check-xiaomi-recovery').hidden=!limited||unboundReady&&showForm;
+  $('check-xiaomi-recovery').disabled=Boolean(check?.retry_after)||Boolean(check?.recovering)||loginActive;
+  $('check-xiaomi-recovery').textContent=connected?'检查是否恢复（不重新登录）':'开始绑定';
   $('connection-badge').textContent=s==='ready'?'小米账号已绑定':s==='needs_verification'?'小米账号绑定已失效':statusText;
-  $('connection-badge').title=s==='connection_error'?'暂时无法访问小米服务，后台会自动检查并重试；原绑定保留。详情见“我的设备”。':s==='ready'?'已保存小米账号绑定；系统会自动检查，无需手动确认。':s==='needs_verification'?'小米账号绑定需要重新验证；平台登录不受影响。':'小米账号绑定状态';
-  $('connection-badge').className='badge'+(s==='ready'?' green':s==='needs_verification'||s==='connection_error'?' orange':'');
+  $('connection-badge').title=limited?'小米请求受限，已暂停相关访问；冷却时间不会因刷新或重启清零。':s==='connection_error'?'暂时无法访问小米服务，后台会自动检查并重试；原绑定保留。详情见“我的设备”。':s==='ready'?'已保存小米账号绑定；系统会自动检查，无需手动确认。':s==='needs_verification'?'小米账号绑定需要重新验证；平台登录不受影响。':'小米账号绑定状态';
+  $('connection-badge').className='badge'+(s==='ready'?' green':warning?' orange':'');
   notifyBindingState(s);
 }
 async function refreshUsage(){renderUsage(await api('/usage'));}
@@ -501,6 +511,10 @@ form('binding-form',async(data,f)=>{
 });
 form('otp-form',async(data,f)=>{await api('/xiaomi/code','POST',{job_id:state.login.id,code:data.get('code')});f.reset();$('otp-form').hidden=true;$('login-state').textContent='正在校验验证码…';});
 action('resume-reverify',async()=>{state.reverifyDismissed=false;state.bindingMode='reverify';state.bindingEditing=true;updateConnection();$('xiaomi-secret-input').focus();});
+action('check-xiaomi-recovery',async()=>{
+  if(state.me.account_state==='unbound'){resetBindingForm();state.bindingMode='bind';state.bindingEditing=true;updateConnection();$('xiaomi-account-input').focus();return;}
+  const result=await api('/xiaomi/recover','POST');state.me=await api('/me');updateConnection();toast(result.message||'检查已完成');
+});
 action('retry-binding',async()=>{state.bindingMode=state.login?.mode||'bind';state.bindingEditing=true;state.reverifyDismissed=false;updateConnection();$('xiaomi-secret-input').focus();});
 action('replace-account',async()=>{resetBindingForm();state.bindingMode='replace';state.bindingEditing=true;$('account-action-state').textContent='验证新绑定账号期间，现有绑定保持不变。';updateConnection();$('xiaomi-account-input').focus();});
 async function cancelAccountOperation(){

@@ -86,6 +86,10 @@ class Store:
             CREATE TABLE IF NOT EXISTS fallback_rules (
                 id TEXT PRIMARY KEY, name TEXT NOT NULL, match_type TEXT NOT NULL, content TEXT NOT NULL,
                 enabled INTEGER NOT NULL DEFAULT 1);
+            CREATE TABLE IF NOT EXISTS xiaomi_cooldowns (
+                user_id TEXT PRIMARY KEY, failures INTEGER NOT NULL, until REAL NOT NULL,
+                manual_required INTEGER NOT NULL, lease TEXT NOT NULL, lease_until REAL NOT NULL,
+                revision TEXT NOT NULL, http_status INTEGER, upstream_code INTEGER, updated REAL NOT NULL);
             CREATE TABLE IF NOT EXISTS migrations (name TEXT PRIMARY KEY);
             INSERT OR IGNORE INTO settings VALUES (1,'{}');
             ''')

@@ -409,6 +409,13 @@ def create_app(root=None, cfg=None, excluded=(), runtime_factory=Runtime, mailer
         rate(request, 'xiaomi-check', 6)
         return await runtime.check_login(user['user_id'])
 
+    @app.post('/api/xiaomi/recover')
+    async def recover_xiaomi(request: Request, user=Depends(current)):
+        rate(request, 'xiaomi-recovery', 3)
+        if not runtime.xiaomi.status(user['user_id']):
+            raise Rejected('当前没有小米限流暂停，无需重复检查', 409)
+        return await runtime.check_login(user['user_id'], manual_recovery=True)
+
     @app.post('/api/xiaomi/reverify')
     async def reverify(data: Reverify, request: Request, user=Depends(current)):
         rate(request, 'xiaomi', 3)

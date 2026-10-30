@@ -25,6 +25,7 @@ from .store import Rejected
 from .security import masked_account
 from .routing import failure_match
 from .xiaomi_otp import observe_response, recipient_method
+from .xiaomi_access import XiaomiAccess, XiaomiSession, RateLimited
 
 # The dependency can log raw authentication responses. Never forward those logs.
 for logger_name in ('miservice', 'LiteLLM', 'LiteLLM Router', 'LiteLLM Proxy', 'httpx', 'httpcore', 'openai'):
@@ -114,6 +115,7 @@ class TokenStore:
 class Runtime:
     def __init__(self, store, cfg, excluded=()):
         self.store, self.base_cfg = store, cfg
+        self.xiaomi = XiaomiAccess(store)
         self.services = ModelServices(store, cfg)
         self.excluded = set(excluded)
         self.jobs, self.accounts, self.workers = {}, {}, {}
@@ -179,6 +181,8 @@ class Runtime:
 
     @staticmethod
     def _probe_result(status, data):
+        if status == 429:
+            return 'rate_limited'
         if status == 401:
             return 'expired'
         if status != 200 or not isinstance(data, dict):
@@ -196,7 +200,8 @@ class Runtime:
 
     async def _probe_token(self, uid, token):
         # Use raw, read-only HTTP requests: no MiAccount/MiNA auto-login or token deletion.
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as session:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=12)) as raw_session:
+            session = XiaomiSession(raw_session, self.xiaomi, uid)
             cookies = {'userId': str(token['userId']), 'serviceToken': token['micoapi'][1]}
 
             async def read(url, params, request_cookies):
@@ -225,7 +230,7 @@ class Runtime:
                 return await self._probe_miot_token(session, token)
             return 'valid'
 
-    async def _probe_miot_token(self, session, token):
+    async def _probe_miot_token(self, session, token, diagnostic=None):
         """Signed device metadata read only; never submit speech or auto-login."""
         sid = token.get('xiaomiio')
         if not token.get('deviceId') or not isinstance(sid, (list, tuple)) or len(sid) != 2 or not all(sid):
@@ -240,11 +245,18 @@ class Runtime:
                 body = await response.json(content_type=None)
             except (ValueError, TypeError):
                 body = None
+            if diagnostic is not None:
+                diagnostic['http_status'] = response.status
+                code = body.get('code') if isinstance(body, dict) else None
+                if type(code) is int and abs(code) <= 999999999:
+                    diagnostic['upstream_code'] = code
             return self._probe_result(response.status, body)
 
-    async def check_login(self, uid):
+    async def check_login(self, uid, *, manual_recovery=False):
         lock = self.probe_locks.setdefault(uid, asyncio.Lock())
         async with lock:
+            if manual_recovery and not self.xiaomi.status(uid):
+                return self.last_check(uid) or {'state': 'unknown', 'message': '暂停已结束，无需重复检查。'}
             saved = self.store.account(uid)
             if not saved:
                 raise Rejected('尚未绑定小米账号', 409)
@@ -253,16 +265,25 @@ class Runtime:
             token = deepcopy(ctx['account'].token if ctx and ctx['account'].token
                              else saved['credentials']['token'])
             try:
-                if not token.get('userId') or not token.get('micoapi'):
-                    state = 'expired'
-                else:
-                    async with self.probe_gate:
-                        state = await asyncio.wait_for(self._probe_token(uid, token), timeout=20)
+                async with self.probe_gate:
+                    async with self.xiaomi.probe(uid, manual_recovery) as permit:
+                        if not token.get('userId') or not token.get('micoapi'):
+                            state = 'expired'
+                        else:
+                            state = await asyncio.wait_for(self._probe_token(uid, token), timeout=20)
+                        self.xiaomi.finish_probe(permit, state)
+            except RateLimited:
+                state = 'rate_limited'
             except Exception:
                 state = 'unknown'
             current = self.store.account(uid)
             if not current or current['identity'] != identity or current['updated'] != version:
                 raise Rejected('绑定已变化，请重新检查', 409)
+            pause = self.xiaomi.status(uid)
+            if pause:
+                return pause
+            if state == 'rate_limited':
+                return self.last_check(uid) or {'state': 'unknown', 'message': '另一项检查已结束暂停，请稍后查看状态。'}
             messages = {'valid': '当前小米账号绑定正常，无需重新绑定。',
                         'expired': '当前小米账号绑定已失效，请输入当前账号的密码重新绑定。',
                         'unknown': '暂时无法确认小米账号的绑定状态，请稍后重试；未发起重新绑定或发送验证码。'}
@@ -283,6 +304,9 @@ class Runtime:
             return self.last_check(uid)
 
     def last_check(self, uid):
+        pause = self.xiaomi.status(uid)
+        if pause:
+            return pause
         saved = self.store.account(uid)
         check = self.checks.get(uid)
         if not saved or not check or check['identity'] != saved['identity'] or check['version'] != saved['updated']:
@@ -302,6 +326,8 @@ class Runtime:
         return 60 if error and not persistent else BINDING_RETRY_INTERVAL
 
     def connection_state(self, uid):
+        if self.xiaomi.status(uid):
+            return 'rate_limited'
         ctx = self.accounts.get(uid, {})
         check = self.last_check(uid)
         return ('connection_error' if ctx.get('state') == 'connection_error' or (check and check['state'] == 'unknown')
@@ -336,6 +362,12 @@ class Runtime:
             if (uid in self.binding_probes or uid in self.changing or (lock and lock.locked())
                     or (job and (not job['task'].done() or job['state'] == 'awaiting_confirmation'))):
                 continue
+            pause = self.xiaomi.status(uid)
+            if pause:
+                if pause['retry_after'] or pause['manual_required'] or pause['recovering']:
+                    continue
+                self.binding_probes[uid] = asyncio.create_task(self._automatic_binding_check(uid))
+                continue
             check = self.checks.get(uid)
             current = check and check['identity'] == row['identity'] and check['version'] == row['updated']
             if current:
@@ -356,6 +388,9 @@ class Runtime:
             log.warning('automatic binding status check unavailable')
 
     def _begin(self, uid, username, password, mode):
+        pause = self.xiaomi.status(uid)
+        if pause and (mode != 'bind' or self.store.account(uid) or pause['retry_after']):
+            self.xiaomi.ensure(uid)
         self.login_status(uid)  # Expire stale confirmation candidates first.
         job = self.jobs.get(uid)
         if uid in self.changing or (job and (not job['task'].done()
@@ -365,7 +400,7 @@ class Runtime:
             remaining = math.ceil(60 - (time.time() - job['created']))
             raise Rejected(f'距离上次开始绑定还需等待{remaining}秒，请勿重复提交。', 429)
         saved = self.store.account(uid)
-        job = {'id': secrets.token_hex(16), 'state': 'logging_in', 'created': time.time(), 'mode': mode,
+        job = {'id': secrets.token_hex(16), 'uid': uid, 'state': 'logging_in', 'created': time.time(), 'mode': mode,
                'expected_identity': saved['identity'] if saved else None}
         self.jobs[uid] = job
         job['task'] = asyncio.create_task(self._login(uid, username, password, job))
@@ -377,6 +412,7 @@ class Runtime:
         return self._begin(uid, username, password, 'bind')
 
     async def begin_reverify(self, uid, password):
+        self.xiaomi.ensure(uid)
         # Recheck on submit as well: neither an altered client nor a stale page can force a valid login.
         result = await self.check_login(uid)
         if result['state'] == 'valid':
@@ -392,10 +428,24 @@ class Runtime:
         return self._begin(uid, username, password, 'replace')
 
     async def _login(self, uid, username, password, job):
+        if job['mode'] == 'bind' and self.xiaomi.status(uid):
+            try:
+                async with self.xiaomi.probe(uid, manual=True, lease_seconds=900) as permit:
+                    await self._login_attempt(uid, username, password, job)
+                    if job['state'] == 'completed':
+                        self.xiaomi.finish_probe(permit, 'valid')
+            except RateLimited as exc:
+                self._binding_failure(job, None, 'failed', str(exc), 'rate_limited')
+        else:
+            await self._login_attempt(uid, username, password, job)
+
+    async def _login_attempt(self, uid, username, password, job):
         account = None
         job['stage'] = 'read_auth'
         try:
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as raw_session:
+                session = XiaomiSession(raw_session, self.xiaomi, uid)
+
                 async def otp(method):
                     job['future'] = asyncio.get_running_loop().create_future()
                     recipients = getattr(account, 'otp_recipients', None) or {}
@@ -409,6 +459,7 @@ class Runtime:
                                       otp_callback=otp, interactive=True)
                 ok = await asyncio.wait_for(account.login('micoapi'), timeout=240)
                 if not ok:
+                    self.xiaomi.ensure(uid)
                     raise Rejected('绑定验证失败；请检查信息，稍后重试绑定。原绑定保持不变。')
                 identity = self.store.assert_available(uid, account.token)
                 if job['mode'] == 'replace' and identity == job['expected_identity']:
@@ -422,12 +473,15 @@ class Runtime:
                 if self.base_cfg.get('tts', {}).get('method') == 'miot':
                     job.update(stage='speech_auth', code_submitted=False)
                     if not await asyncio.wait_for(account.login('xiaomiio'), timeout=240):
+                        self.xiaomi.ensure(uid)
                         raise Rejected('音箱播报授权验证未完成，请按提示重试绑定；原账号及设备选择保留')
                     if self.store.assert_available(uid, account.token) != identity:
                         raise Rejected('音箱读取与播报授权身份不一致，原绑定保持不变', 409)
                     job['stage'] = 'speech_check'
-                    if await self._probe_miot_token(session, account.token) != 'valid':
+                    job['probe_diagnostic'] = {}
+                    if await self._probe_miot_token(session, account.token, job['probe_diagnostic']) != 'valid':
                         raise Rejected('音箱播报授权暂不可用，尚未更新绑定；请稍后重试，原账号及设备选择保留')
+                self.xiaomi.ensure(uid)
                 job['verified_at'] = time.time()
                 candidate = {'credentials': {'username': username, 'password': password, 'token': account.token},
                              'devices': self.normalize_devices(raw_rows)}
@@ -461,8 +515,8 @@ class Runtime:
         labels = {'read_auth': '小米账号读取授权', 'devices': '获取设备列表',
                   'speech_auth': '音箱播报授权', 'speech_check': '检查播报授权', 'apply': '保存绑定'}
         diagnostic = {'stage': stage, 'kind': kind}
-        auth = getattr(account, 'auth_diagnostic', {})
-        if stage in ('read_auth', 'speech_auth'):
+        auth = job.get('probe_diagnostic', {}) if stage == 'speech_check' else getattr(account, 'auth_diagnostic', {})
+        if stage in ('read_auth', 'speech_auth', 'speech_check'):
             if auth.get('failure_kind') in ('timeout', 'network', 'unexpected'):
                 kind = auth['failure_kind']
                 diagnostic['kind'] = kind
@@ -470,6 +524,18 @@ class Runtime:
                 value = auth.get(key)
                 if type(value) is int and abs(value) <= 999999999:
                     diagnostic[key] = value
+        pause = self.xiaomi.status(job.get('uid', ''))
+        blocked = False
+        if pause:
+            try:
+                self.xiaomi.ensure(job.get('uid', ''))
+            except RateLimited:
+                blocked = True
+        if blocked:
+            kind = 'rate_limited'
+            diagnostic.update(kind=kind, **{k: v for k, v in pause.items()
+                                            if k in ('http_status', 'upstream_code')})
+            message = str(RateLimited(pause))
         detail = '验证码已提交，但本次验证尚未完成。' if job.get('code_submitted') else ''
         message = f"{labels[stage]}未完成。{detail}{message}这不代表已确认密码错误；不会自动重新绑定，请查看结果后主动重试。"
         job.pop('candidate', None)
@@ -478,6 +544,7 @@ class Runtime:
                     diagnostic.get('http_status'), diagnostic.get('upstream_code'))
 
     async def _apply(self, uid, job):
+        self.xiaomi.ensure(uid)
         if uid in self.changing:
             raise Rejected('已有切换操作进行中', 409)
         self.changing.add(uid)
@@ -545,6 +612,7 @@ class Runtime:
         f = job.get('future')
         if not f or f.done():
             raise Rejected('验证码已提交', 409)
+        self.xiaomi.ensure(uid)
         job['state'] = 'verifying'
         job['code_submitted'] = True
         f.set_result(code)
@@ -601,7 +669,7 @@ class Runtime:
         if not saved:
             raise Rejected('请先绑定小米账号')
         c = saved['credentials']
-        session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30))
+        session = XiaomiSession(aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)), self.xiaomi, uid)
         tokens = TokenStore(self.store, uid, c['username'], c['password'], c['token'])
         account = SafeAccount(session, c['username'], c['password'], token_store=tokens)
         account.token = c['token']
@@ -612,6 +680,7 @@ class Runtime:
         return ctx
 
     async def refresh(self, uid):
+        self.xiaomi.ensure(uid)
         if uid in self.changing:
             raise Rejected('账号切换进行中，请稍后刷新设备', 409)
         ctx = await self.context(uid)
@@ -784,7 +853,11 @@ class Runtime:
             sp = ctx['speaker']
             responder = asyncio.create_task(self.reply_loop(uid, did, sp, queue, turn))
             while not self.stopping and self.enabled(uid, did):
+                if self.xiaomi.status(uid):
+                    await self._poll_pause(uid, did, 1)
+                    continue
                 try:
+                    self.xiaomi.ensure(uid)
                     if hasattr(sp, 'recent_asks'):
                         items = await sp.recent_asks(did)
                     else:
@@ -908,6 +981,10 @@ class Runtime:
         if turn:
             turn.checkpoint()
         cfg = self.config(uid)
+        if self.xiaomi.status(uid):
+            if source == 'speaker':
+                return None
+            self.xiaomi.ensure(uid)
         if source == 'speaker':
             dialogue = self.store.dialogue(uid)
             stale = observed_ts is not None and observed_ts <= max(dialogue['routing_updated'], time.time() - 60)
@@ -940,7 +1017,8 @@ class Runtime:
             if source == 'speaker':
                 stale = observed_ts is not None and observed_ts <= max(
                     self.store.dialogue(uid)['routing_updated'], time.time() - 60)
-                cancelled = cancelled or not self.enabled(uid, did) or stale or not self.route(uid, text, native_answer)
+                cancelled = (cancelled or bool(self.xiaomi.status(uid)) or not self.enabled(uid, did)
+                             or stale or not self.route(uid, text, native_answer))
             if cancelled:
                 self.store.update_request(rid, status='cancelled')
                 raise Rejected('服务或设备已暂停', 409)
