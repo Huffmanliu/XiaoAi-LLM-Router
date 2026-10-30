@@ -17,7 +17,7 @@ function displayWorkspace(loggedIn){
   if(loggedIn)displayView(state.view);else viewScreens.forEach(el=>mountScreen(el.id,false));
 }
 const state = {me:null, csrf:'', deviceSaving:false, adminTab:'users', modelServices:[], modelTesting:null, view:'overview', devices:[], selected:new Set(), login:null,
-  reverifyDismissed:false, bindingEditing:false, bindingMode:'bind', admin:null, historyBefore:null, historyAfter:null, historyBusy:false, historyReload:false, historyEpoch:0, refreshing:false, invite:null, loginCompleted:null};
+  reverifyDismissed:false, bindingFailureSeen:null, bindingEditing:false, bindingMode:'bind', admin:null, historyBefore:null, historyAfter:null, historyBusy:false, historyReload:false, historyEpoch:0, refreshing:false, invite:null, loginCompleted:null};
 const rankingState={page:1,pages:1,epoch:0,controller:null,lastAttempt:0,lastUpdated:null,autoDate:true};
 const labels = {overview:['概览','一切尽在掌握'], devices:['我的设备','选择连接，让 AI 就位'],
   history:['对话历史','留住每一次好奇'], dialogue:['对话设置','让回答更合你的心意'],
@@ -95,6 +95,7 @@ async function fetchDevices(restoreSaved=false){
 }
 async function hydrate(){
   state.me=await api('/me');state.csrf=state.me.csrf;
+  state.login=await api('/xiaomi/login');
   if(state.view==='admin'&&state.me.role!=='admin')state.view='overview';
   displayWorkspace(true);$('username').textContent=state.me.username;$('avatar').textContent=state.me.username[0].toUpperCase();$('environment').textContent=state.me.environment;$('admin-nav').hidden=state.me.role!=='admin';$('retention').textContent=state.me.retention_days;
   resetBindingForm();updateConnection();await fetchDevices(true);renderDialogue();await refreshUsage();
@@ -148,13 +149,24 @@ function updateConnection(){
   const slowRetry=s==='connection_error'&&check?.retry_interval===300;
   const loginActive=['logging_in','verification_required','verifying','applying'].includes(state.login?.state);
   const pending=state.login?.state==='awaiting_confirmation';
-  if(expired&&!state.reverifyDismissed&&!state.bindingEditing&&!pending&&!loginActive){
+  const failed=['failed','expired'].includes(state.login?.state);
+  if(failed&&state.bindingFailureSeen!==state.login.id){
+    state.bindingFailureSeen=state.login.id;resetBindingForm();state.reverifyDismissed=true;
+  }
+  if(expired&&!failed&&!state.reverifyDismissed&&!state.bindingEditing&&!pending&&!loginActive){
     state.bindingMode='reverify';state.bindingEditing=true;
   }else if(!canReverify&&state.bindingMode==='reverify'&&!loginActive){
     resetBindingForm();
   }
   const mode=loginActive?state.login.mode:state.bindingMode;
-  const showForm=(!connected||state.bindingEditing)&&!pending&&!loginActive;
+  const showForm=(!connected||state.bindingEditing)&&(!failed||state.bindingEditing)&&!pending&&!loginActive;
+  const wait=Math.max(0,Number(state.login?.retry_after)||0);
+  const retryAvailable=state.login?.mode!=='reverify'||canReverify;
+  $('binding-result').hidden=!failed;
+  $('binding-result-message').textContent=failed?(state.login.message||'本次绑定未完成，原绑定保持不变。')+(!retryAvailable&&check?.state==='valid'?'原绑定现已恢复正常，无需再次重新绑定。':''):'';
+  $('retry-binding').hidden=!failed||showForm||!retryAvailable;
+  $('retry-binding').disabled=wait>0;
+  $('retry-binding').textContent=wait>0?`还需等待${wait}秒后重新尝试`:'我已了解结果，重新尝试';
   const verified=s==='ready'&&check?.state==='valid'&&Date.now()/1000-check.checked_at<300;
   const statusText=verified?'已绑定':(statusName[s]||s);
   $('binding-title').textContent=expired?'需要重新绑定小米账号':connected?'已绑定的小米账号':'绑定小米账号';
@@ -166,7 +178,7 @@ function updateConnection(){
   $('connected-account-note').textContent=verified?'当前小米账号绑定正常，无需重新绑定。可以直接在下方管理音箱。':s==='ready'?'账号凭据已加密保存。系统会自动检查绑定状态，无需手动确认。':expired?'原账号及设备选择已保留，请重新绑定以恢复使用。平台登录不受影响。':slowRetry?'小米服务持续访问异常，已延长至约每5分钟检查一次，期间 AI 接管可能受影响。后台不会自动重新登录或发送验证码。你也可以主动重新绑定当前账号，原设备选择保留。':'暂时无法访问小米服务，后台约每分钟检查一次；持续异常约2分钟后会延长至约每5分钟。期间 AI 接管可能受影响。原绑定和设备选择保留，后台不会自动重新登录或发送验证码。';
   $('binding-access-state').hidden=s!=='connection_error'||pending;
   $('binding-access-state').textContent=slowRetry?'访问异常，约每5分钟重试':'访问异常，稍后重试';
-  $('resume-reverify').hidden=!canReverify||showForm||pending||loginActive;
+  $('resume-reverify').hidden=failed||!canReverify||showForm||pending||loginActive;
   $('replace-account').hidden=showForm||pending;
   $('replace-account').disabled=loginActive;
   $('binding-form').hidden=!showForm;
@@ -181,7 +193,7 @@ function updateConnection(){
   $('cancel-login').textContent=cancelLabel;$('cancel-active-login').textContent=cancelLabel;
   $('binding-hint').textContent=mode==='reverify'?'仅重新绑定上方的小米账号，不能在此更换账号。请输入该小米账号的密码，按小米要求完成验证码验证。':mode==='replace'?'填写新小米账号和密码。提交时按需验证平台安全邮箱，原绑定保持不变；新账号验证成功后，还需确认才会切换。':'你已登录平台，还未绑定小米账号。请填写你自己的小米账号与密码，平台账号不能用于此处。';
   $('cancel-active-login').hidden=!loginActive;
-  $('login-state').hidden=!loginActive&&!['failed','expired','cancelled'].includes(state.login?.state);
+  $('login-state').hidden=!loginActive&&state.login?.state!=='cancelled';
   $('switch-confirmation').hidden=!pending;
   if(pending)$('switch-summary').textContent=`将从 ${state.login.old_label} 更换为 ${state.login.new_label}，发现 ${state.login.device_count} 台音箱。旧账号目前仍在使用。`;
   $('unbind').disabled=!connected||loginActive||pending;
@@ -484,10 +496,12 @@ form('binding-form',async(data,f)=>{
     if(state.login.state==='already_valid'){resetBindingForm();state.me=await api('/me');toast(state.login.message);}
     else $('login-state').textContent=mode==='replace'?'正在验证新绑定账号，原绑定保持不变…':'正在重新绑定当前小米账号…';
     updateConnection();
-  }finally{payload.password='';f.elements.xiaomi_secret.value='';f.elements.xiaomi_secret.readOnly=true;}
+  }catch(e){$('account-action-state').textContent=e.message;throw e;}
+  finally{payload.password='';f.elements.xiaomi_secret.value='';f.elements.xiaomi_secret.readOnly=true;}
 });
 form('otp-form',async(data,f)=>{await api('/xiaomi/code','POST',{job_id:state.login.id,code:data.get('code')});f.reset();$('otp-form').hidden=true;$('login-state').textContent='正在校验验证码…';});
 action('resume-reverify',async()=>{state.reverifyDismissed=false;state.bindingMode='reverify';state.bindingEditing=true;updateConnection();$('xiaomi-secret-input').focus();});
+action('retry-binding',async()=>{state.bindingMode=state.login?.mode||'bind';state.bindingEditing=true;state.reverifyDismissed=false;updateConnection();$('xiaomi-secret-input').focus();});
 action('replace-account',async()=>{resetBindingForm();state.bindingMode='replace';state.bindingEditing=true;$('account-action-state').textContent='验证新绑定账号期间，现有绑定保持不变。';updateConnection();$('xiaomi-account-input').focus();});
 async function cancelAccountOperation(){
   const active=['logging_in','verification_required','verifying','awaiting_confirmation','applying'].includes(state.login?.state);
@@ -544,8 +558,9 @@ async function tick(){if(!state.me||document.hidden||state.refreshing)return;sta
   state.me=await api('/me');const job=await api('/xiaomi/login');state.login=job;updateConnection();
   if(state.view==='devices'){
     const recipient=job.recipient||(job.method==='短信'?'小米账号绑定的安全手机（可能不是你当前使用的手机号）':'小米账号绑定的安全邮箱');
-    const otpMessage=`需要小米${job.method||''}验证码，请查看${recipient}收到的${job.method||'验证码'}，并在下方填写。这不是平台登录的邮箱验证码。`;
-    const messages={logging_in:'正在绑定小米账号…',verification_required:otpMessage,verifying:'正在验证…',completed:job.message,awaiting_confirmation:job.message,applying:'正在应用账号更新，等待当前回答结束…',expired:job.message,failed:job.message,cancelled:'本次绑定已取消'};
+    const stageLabel={read_auth:'小米账号读取授权',devices:'获取设备列表',speech_auth:'音箱播报授权',speech_check:'检查播报授权',apply:'保存绑定'}[job.stage]||'小米账号绑定';
+    const otpMessage=`${stageLabel}需要小米${job.method||''}验证码，请查看${recipient}收到的${job.method||'验证码'}，并在下方填写。这不是平台登录的邮箱验证码。读取与播报授权可能分别要求验证。`;
+    const messages={logging_in:`正在完成${stageLabel}…`,verification_required:otpMessage,verifying:`验证码已提交，正在继续完成${stageLabel}…`,completed:job.message,awaiting_confirmation:job.message,applying:'正在应用账号更新，等待当前回答结束…',expired:job.message,failed:job.message,cancelled:'本次绑定已取消'};
     $('login-state').textContent=messages[job.state]||'';$('otp-form').hidden=job.state!=='verification_required';
   }
   if(job.state==='completed'&&state.loginCompleted!==job.id){state.loginCompleted=job.id;resetBindingForm();state.me=await api('/me');updateConnection();await fetchDevices(true);$('account-action-state').textContent=job.message;toast(job.message||'账号更新完成');}

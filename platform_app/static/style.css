@@ -51,3 +51,5 @@ a.button{display:inline-block;text-decoration:none;color:var(--ink);border:1px s
 .feedback-reply p{margin:8px 0 0}.feedback-handle{margin-top:18px;max-width:700px}.support-filter{max-width:230px}
 #feedback-submit-result,#feedback-list-message,#admin-feedback-message{font-size:13px;color:#496358;overflow-wrap:anywhere}
 @media(max-width:720px){.help-shell{padding:22px 18px}.help-header{margin-bottom:30px;align-items:flex-start}.help-header .brand{font-size:22px}.help-header .service-identity{font-size:11px}.help-header .button{white-space:nowrap;padding:8px 12px}.help-intro h1{font-size:27px}.support-pagination{flex-wrap:wrap}.faq-card summary{font-size:14px}.faq-card details p,.feedback-content{font-size:13px}}
+
+.binding-result{background:#fff3e7;border:1px solid #ead2b8;color:#75451b;margin:16px 0}.binding-result p{margin:10px 0;white-space:pre-wrap;overflow-wrap:anywhere}

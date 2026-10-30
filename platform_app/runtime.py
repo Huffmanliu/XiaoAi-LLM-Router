@@ -4,6 +4,7 @@ from copy import deepcopy
 from contextlib import asynccontextmanager
 import logging
 import json
+import math
 import secrets
 import time
 
@@ -44,18 +45,41 @@ class SafeAccount(MiAccount):
         self.interactive = interactive
         self.login_lock = asyncio.Lock()
         self.otp_recipients = None
+        self.auth_diagnostic = {}
 
     def request(self, url, method='GET', **kwargs):
         request = super().request(url, method=method, **kwargs)
         channel = recipient_method(url, method)
         if self.otp_recipients is not None and channel:
-            return observe_response(request, self.otp_recipients, channel)
-        return request
+            request = observe_response(request, self.otp_recipients, channel)
+        return self._observe_auth_request(request) if self.interactive else request
+
+    @asynccontextmanager
+    async def _observe_auth_request(self, request):
+        self.auth_diagnostic = {}
+        try:
+            async with request as response:
+                self.auth_diagnostic['http_status'] = response.status
+                yield response
+        except Exception as exc:
+            kind = 'network' if isinstance(exc, aiohttp.ClientError) else 'unexpected'
+            self.auth_diagnostic['failure_kind'] = 'timeout' if isinstance(exc, asyncio.TimeoutError) else kind
+            raise
+
+    async def _serviceLogin(self, uri, data=None):
+        self.auth_diagnostic = {}
+        response = await super()._serviceLogin(uri, data)
+        # Never retain response bodies, URLs, usernames, passwords or session tokens.
+        code = response.get('code') if isinstance(response, dict) else None
+        if type(code) is int and abs(code) <= 999999999:
+            self.auth_diagnostic['upstream_code'] = code
+        return response
 
     async def login(self, sid):
         if not self.interactive:
             raise VerificationRequired('Explicit account binding required')
         async with self.login_lock:
+            self.auth_diagnostic = {}
             return await super().login(sid)
 
     async def _verify_otp(self, sid, ntf):
@@ -144,8 +168,11 @@ class Runtime:
         if job['state'] == 'awaiting_confirmation' and job.get('expires', 0) <= time.time():
             job.pop('candidate', None)
             job.update(state='expired', message='新账号验证已过期，原绑定保持不变，请重新开始')
-        fields = ('id', 'state', 'mode', 'method', 'message', 'old_label', 'new_label', 'device_count')
+        fields = ('id', 'state', 'mode', 'method', 'message', 'old_label', 'new_label', 'device_count',
+                  'stage', 'diagnostic')
         result = {k: job[k] for k in fields if k in job}
+        if job['state'] in ('failed', 'expired'):
+            result['retry_after'] = max(0, math.ceil(60 - (time.time() - job['created'])))
         if job['state'] == 'verification_required':
             result['recipient'] = job.get('recipient', '')
         return result
@@ -335,7 +362,8 @@ class Runtime:
                                              or job['state'] == 'awaiting_confirmation')):
             raise Rejected('已有账号操作，请完成或取消', 409)
         if job and time.time() - job['created'] < 60:
-            raise Rejected('请间隔60秒后重试绑定', 429)
+            remaining = math.ceil(60 - (time.time() - job['created']))
+            raise Rejected(f'距离上次开始绑定还需等待{remaining}秒，请勿重复提交。', 429)
         saved = self.store.account(uid)
         job = {'id': secrets.token_hex(16), 'state': 'logging_in', 'created': time.time(), 'mode': mode,
                'expected_identity': saved['identity'] if saved else None}
@@ -364,6 +392,8 @@ class Runtime:
         return self._begin(uid, username, password, 'replace')
 
     async def _login(self, uid, username, password, job):
+        account = None
+        job['stage'] = 'read_auth'
         try:
             async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=30)) as session:
                 async def otp(method):
@@ -385,14 +415,17 @@ class Runtime:
                     raise Rejected('这是当前已绑定的账号，无需更换；系统会自动检查绑定状态')
                 if job['mode'] == 'reverify' and identity != job['expected_identity']:
                     raise Rejected('验证身份与当前绑定不一致，原绑定保持不变', 409)
+                job['stage'] = 'devices'
                 raw_rows = await asyncio.wait_for(MiNAService(account).device_list(), timeout=30)
                 if raw_rows is None:
                     raise Rejected('账号验证成功，但设备列表暂不可用，原绑定保持不变，请稍后重试')
                 if self.base_cfg.get('tts', {}).get('method') == 'miot':
+                    job.update(stage='speech_auth', code_submitted=False)
                     if not await asyncio.wait_for(account.login('xiaomiio'), timeout=240):
                         raise Rejected('音箱播报授权验证未完成，请按提示重试绑定；原账号及设备选择保留')
                     if self.store.assert_available(uid, account.token) != identity:
                         raise Rejected('音箱读取与播报授权身份不一致，原绑定保持不变', 409)
+                    job['stage'] = 'speech_check'
                     if await self._probe_miot_token(session, account.token) != 'valid':
                         raise Rejected('音箱播报授权暂不可用，尚未更新绑定；请稍后重试，原账号及设备选择保留')
                 job['verified_at'] = time.time()
@@ -406,6 +439,7 @@ class Runtime:
                                new_label=masked_account(username), device_count=len(candidate['devices']),
                                message='新账号验证成功，原账号仍在使用。请确认切换，或取消保留原账号。')
                 else:
+                    job['stage'] = 'apply'
                     await self._apply(uid, job)
         except asyncio.CancelledError:
             job.pop('candidate', None)
@@ -413,16 +447,35 @@ class Runtime:
                 job.update(state='cancelled', message='操作已取消，原绑定保持不变')
             raise
         except asyncio.TimeoutError:
-            job.pop('candidate', None)
-            job.update(state='expired', message='验证超时，原绑定保持不变，请重新开始')
+            self._binding_failure(job, account, 'expired', '验证超时。原账号及设备选择保留。', 'timeout')
         except Rejected as exc:
-            job.pop('candidate', None)
-            job.update(state='failed', message=str(exc))
-        except Exception:
-            job.pop('candidate', None)
-            job.update(state='failed', message='连接失败，原绑定保持不变，请稍后重试')
+            self._binding_failure(job, account, 'failed', str(exc), 'not_completed')
+        except Exception as exc:
+            kind = 'network' if isinstance(exc, aiohttp.ClientError) else 'unexpected'
+            self._binding_failure(job, account, 'failed', '未能完成连接或处理服务响应，原账号及设备选择保留。', kind)
         finally:
             job.pop('future', None)
+
+    def _binding_failure(self, job, account, state, message, kind):
+        stage = job.get('stage', 'read_auth')
+        labels = {'read_auth': '小米账号读取授权', 'devices': '获取设备列表',
+                  'speech_auth': '音箱播报授权', 'speech_check': '检查播报授权', 'apply': '保存绑定'}
+        diagnostic = {'stage': stage, 'kind': kind}
+        auth = getattr(account, 'auth_diagnostic', {})
+        if stage in ('read_auth', 'speech_auth'):
+            if auth.get('failure_kind') in ('timeout', 'network', 'unexpected'):
+                kind = auth['failure_kind']
+                diagnostic['kind'] = kind
+            for key in ('http_status', 'upstream_code'):
+                value = auth.get(key)
+                if type(value) is int and abs(value) <= 999999999:
+                    diagnostic[key] = value
+        detail = '验证码已提交，但本次验证尚未完成。' if job.get('code_submitted') else ''
+        message = f"{labels[stage]}未完成。{detail}{message}这不代表已确认密码错误；不会自动重新绑定，请查看结果后主动重试。"
+        job.pop('candidate', None)
+        job.update(state=state, message=message, diagnostic=diagnostic)
+        log.warning('xiaomi_binding_failure stage=%s kind=%s http=%s code=%s', stage, kind,
+                    diagnostic.get('http_status'), diagnostic.get('upstream_code'))
 
     async def _apply(self, uid, job):
         if uid in self.changing:
@@ -493,6 +546,7 @@ class Runtime:
         if not f or f.done():
             raise Rejected('验证码已提交', 409)
         job['state'] = 'verifying'
+        job['code_submitted'] = True
         f.set_result(code)
 
     async def cancel_login(self, uid):
